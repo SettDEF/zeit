@@ -1,12 +1,50 @@
 # zeit — plan
 
-**Your shells keep running. Every terminal can pick them up.**
+**Your shells keep running, and remember. Every terminal can pick them up.**
 zeit (German for *time*: sessions that outlast the window, the logout, the
 reboot) is a terminal multiplexer: a server that owns your shells, their
 scrollback and layouts, and clients that show them. In zash it is native:
 nothing is parsed or drawn twice, popups and smooth scrolling keep working,
 and it costs next to nothing. In any other terminal `zeit attach` works like
 tmux, with the same sessions and keys.
+
+## zeit's own idea: time
+
+tmux and zellij are the bar for what must work; they are not the model.
+zeit is built around what its name says: **time**.
+
+- **Every pane has a timeline.** Shell marks cut a pane's life into
+  commands: what ran, in which folder, when, for how long, how it ended, and
+  what it printed. zeit keeps that, per pane, compressed, across reboots.
+- **Scrub back.** One key turns a pane into its timeline: drag (or `h` / `l`)
+  and the pane shows its screen as it was at that moment, an editor session,
+  a build, a test run; Enter copies a command or its output, `r` reruns it in
+  a new pane. Full-screen programs are recorded as frames too, so a Neovim or
+  htop pane can be rewound like a video.
+- **The day at a glance.** A strip across all sessions: when each pane was
+  busy, which commands failed (red), which ran long; click a point to go
+  there. "What was I doing yesterday at four" has an answer.
+- **Places, not session names.** A session belongs to a folder: entering a
+  project (or `zeit` in it) brings back its place, with its panes, running
+  servers and timeline, exactly where it was left. Names are optional.
+- **Panes that remember.** A pane knows the command it is for (a dev server,
+  a log tail, a REPL). After a reboot those come back running; after a crash
+  they restart, with the crash kept in the timeline.
+- **Intent instead of modes.** One key opens zeit's command palette at the
+  cursor (native in zash): type what you want ("split right", "logs", "kill
+  the server on 3000", "go back to the failing test"), zeit does it and shows
+  the shortcut for next time. Modes and a prefix exist for speed; nobody needs
+  them to start.
+- **Layouts by what runs.** zeit arranges a place from what is in it: the
+  editor big, servers and watchers stacked at the side, a finished build
+  folded to one line, a pane that needs attention brought forward. Fixed
+  layouts stay possible; the default thinks.
+- **Quiet by default.** No permanent status bar: things appear when they
+  matter (a command finished in another pane, a server crashed, a pane wants
+  input) and leave again; in zash as native notices at the pane's edge.
+
+Everything below (tmux parity, the friendly parts) is the floor zeit stands
+on; the timeline is what it is for.
 
 ## Why not tmux
 
@@ -210,7 +248,8 @@ boxed list in the grid, a notice a line in the status bar.
 ## Milestones
 
 - **Z0 — sessions that outlive the window.** zeitd with sessions, windows,
-  panes, layouts; zash attaches natively; closing zash detaches.
+  panes, layouts; zash attaches natively; closing zash detaches. Places
+  (a session per folder) and the timeline recorded from the first day.
 - **Z1 — zeit in any terminal.** The text client: `zeit attach`, status line,
   prefix keys from tmux.conf, mouse, the full CLI (`new`, `ls`, `kill`,
   `send-keys`, `capture-pane`, …). Modes with the hint bar.
@@ -219,7 +258,8 @@ boxed list in the grid, a notice a line in the status bar.
 - **Z2 — tmux parity.** Everything in "tmux parity" above: copy mode with
   zett-edit, layouts, swap / break / join, synchronize, popups, hooks,
   choose-tree, buffers, environment updates.
-- **Z3 — time.** Persistence and restore after reboot, scrollback on disk,
+- **Z3 — time.** Scrubbing back through a pane, the day at a glance,
+  panes that remember their command. Persistence and restore after reboot, scrollback on disk,
   pane templates and project sessions.
 - **Z4 — the zash UI protocol** across zeit (popups, overlays, notices,
   panels, images) with text fallbacks.
