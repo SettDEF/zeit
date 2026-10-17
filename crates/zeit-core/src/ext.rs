@@ -39,6 +39,8 @@ struct State {
     hooks: HashMap<String, Vec<RegistryKey>>,
     /// z.rule functions: where a command runs
     rules: Vec<RegistryKey>,
+    /// z.job_column functions: extra columns on job lines
+    job_columns: Vec<RegistryKey>,
     /// zeit commands asked for by Lua, run by the server after the call
     queued: Vec<String>,
     notices: Vec<String>,
@@ -249,6 +251,43 @@ impl Ext {
         None
     }
 
+    /// The z.job_column columns for a job: (tone, text). A function answers a string,
+    /// a { text, tone } table, or nil; tone is good, bad, running, muted or accent.
+    pub fn job_columns(&mut self, data: &[(&str, String)]) -> Vec<(char, String)> {
+        let fs: Vec<Function> = self.st.borrow().job_columns.iter().filter_map(|k| self.lua.registry_value(k).ok()).collect();
+        if fs.is_empty() {
+            return Vec::new();
+        }
+        let Ok(t) = self.lua.create_table() else { return Vec::new() };
+        for (k, v) in data {
+            let _ = t.set(*k, v.as_str());
+        }
+        let mut out = Vec::new();
+        for f in fs {
+            match f.call::<Value>(t.clone()) {
+                Ok(Value::String(s)) => out.push((' ', s.to_string_lossy())),
+                Ok(Value::Table(c)) => {
+                    let text: String = c.get("text").unwrap_or_default();
+                    let tone: String = c.get("tone").unwrap_or_default();
+                    let tone = match tone.as_str() {
+                        "good" => 'g',
+                        "bad" => 'b',
+                        "running" => 'r',
+                        "muted" => 'm',
+                        "accent" => 'a',
+                        _ => ' ',
+                    };
+                    if !text.is_empty() {
+                        out.push((tone, text));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => self.errors.push(format!("job_column: {e}")),
+            }
+        }
+        out
+    }
+
     pub fn has_rules(&self) -> bool {
         !self.st.borrow().rules.is_empty()
     }
@@ -321,6 +360,14 @@ impl Ext {
         let st = self.st.clone();
         z.set("cmd", lua.create_function(move |_, line: String| {
             st.borrow_mut().queued.push(line);
+            Ok(())
+        })?)?;
+
+        // z.job_column(function(job) return { text = '…', tone = 'muted' } end)
+        let st = self.st.clone();
+        z.set("job_column", lua.create_function(move |lua, f: Function| {
+            let k = lua.create_registry_value(f)?;
+            st.borrow_mut().job_columns.push(k);
             Ok(())
         })?)?;
 

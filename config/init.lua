@@ -9,6 +9,7 @@ z.modules {
 }
 
 -- ── look ──────────────────────────────────────────────────────────────
+z.set('default-shell', '/bin/zsh') -- the desktop's SHELL is bash
 z.set('status-position', 'top')
 z.set('status-style', 'fg=white,bg=default')
 z.set('pane-border-style', 'fg=blue')

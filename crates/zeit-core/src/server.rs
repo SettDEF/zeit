@@ -265,6 +265,7 @@ impl Server {
                 let running: Vec<String> = self.jobs.iter().filter(|j| j.end.is_none()).map(|j| j.id.clone()).collect();
                 for id in running {
                     self.job_progress(&id);
+                    self.refresh_job(&id);
                     self.paint_job(&id);
                 }
                 self.dirty = true;
@@ -478,7 +479,7 @@ impl Server {
         let wheel = b & 64 != 0;
         let motion = b & 32 != 0;
         // a click on a job's line unfolds it
-        if press && !wheel && !motion && b & 3 == 0 && self.click_job(&pane, cy - r.y) {
+        if press && !wheel && !motion && b & 3 == 0 && self.click_job(&pane, cy - r.y, cx - r.x) {
             return;
         }
         // a click in another pane gives it the keyboard
@@ -566,6 +567,16 @@ impl Server {
     fn start_pane(&mut self, dir: PathBuf, cmd: Vec<String>) -> Result<String, String> {
         let id = paths::new_id("p");
         let (cols, rows) = (self.size.0.max(2), self.size.1.saturating_sub(1).max(1));
+        // no command: tmux's default-command, else default-shell, else $SHELL
+        let cmd = if !cmd.is_empty() {
+            cmd
+        } else if let Some(c) = self.keys.opts.get("default-command").filter(|c| !c.is_empty()) {
+            vec!["/bin/sh".into(), "-c".into(), format!("exec {c}")]
+        } else if let Some(s) = self.keys.opts.get("default-shell").filter(|s| !s.is_empty()) {
+            vec![s.clone()]
+        } else {
+            cmd
+        };
         crate::holder::start(&self.exe, &id, &dir, cols, rows, &cmd).map_err(|e| e.to_string())?;
         let p = Pane::connect(&id, cols, rows, dir, self.look.history, self.pane_tx.clone()).map_err(|e| e.to_string())?;
         self.panes.insert(id.clone(), p);
@@ -1831,6 +1842,12 @@ impl Server {
                 self.paint_job(&id);
                 Ok(String::new())
             }
+            "job-stop" | "job-rerun" | "job-jump" => {
+                let p = target.or(ctx).ok_or("no pane")?;
+                let id = self.jobs.iter().rev().find(|j| j.origin == p || j.run.as_deref() == Some(p.as_str())).map(|j| j.id.clone()).ok_or("no job here")?;
+                self.job_action(&id, &cmd["job-".len()..])?;
+                Ok(String::new())
+            }
             "jobs" => Ok(self.jobs.iter().map(|j| format!("{}  {}  {}", j.id, j.status_text(), j.cmd)).collect::<Vec<_>>().join("\n")),
             "__keys" => {
                 // for the client: which keys are zeit's, and which repeat
@@ -2095,7 +2112,7 @@ impl Server {
             write_text(grid, row, x + 1 + n, "\u{e0b4}", bg, l.status_bg, 0);
             x + n + 2
         };
-        let mut x = pill(grid, 0, &format!(" {}", s.windows.len()), Color::Indexed(0), l.accent, 0) + 1;
+        let mut x = pill(grid, 0, &format!("{} {}", l.left_icon, s.windows.len()), Color::Indexed(0), l.accent, 0) + 1;
         for (i, w) in s.windows.iter().enumerate() {
             let cmd = self.panes.get(&w.focus).and_then(|p| foreground_name(p.pid)).unwrap_or_default();
             let icon = l.icons.get(&cmd).cloned().unwrap_or_default();
@@ -2437,6 +2454,11 @@ struct Job {
     place: String,
     /// how far along, read from its output (cargo's `120/300`, a `45%`)
     progress: Option<f32>,
+    /// errors, warnings, tests, read from its output
+    counts: Vec<(char, String)>,
+    /// the z.job_column columns
+    extra: Vec<(char, String)>,
+    cwd: PathBuf,
 }
 
 fn duration(d: std::time::Duration, tenths: bool) -> String {
@@ -2449,6 +2471,19 @@ fn duration(d: std::time::Duration, tenths: bool) -> String {
 }
 
 impl Job {
+    /// (glyph, action) at the end of its line
+    fn buttons(&self) -> Vec<(&'static str, &'static str)> {
+        if self.end.is_none() { vec![("■", "stop"), ("⇢", "jump")] } else { vec![("↻", "rerun"), ("⇢", "jump")] }
+    }
+
+    fn tone(&self) -> char {
+        match self.end {
+            None => 'r',
+            Some((_, 0)) => 'g',
+            Some(_) => 'b',
+        }
+    }
+
     fn status_text(&self) -> String {
         match self.end {
             None => format!("⟳ {}", duration(self.start.elapsed(), false)),
@@ -2502,7 +2537,7 @@ impl Server {
             // typed ahead: the new shell reads it once its prompt is up
             p.input(format!("{line}\r").as_bytes());
         }
-        self.jobs.push(Job { id: id.clone(), origin: origin.to_string(), cmd, run: Some(run), line: None, start: std::time::Instant::now(), end: None, out: None, sent: true, open: false, kept: Vec::new(), place: place.to_string(), progress: None });
+        self.jobs.push(Job { id: id.clone(), origin: origin.to_string(), cmd, run: Some(run), line: None, start: std::time::Instant::now(), end: None, out: None, sent: true, open: false, kept: Vec::new(), place: place.to_string(), progress: None, counts: Vec::new(), extra: Vec::new(), cwd });
         // a long list of old jobs is not needed
         if self.jobs.len() > 200 {
             self.jobs.remove(0);
@@ -2532,6 +2567,7 @@ impl Server {
                         j.kept = kept;
                     }
                 }
+                self.refresh_job(&id);
                 let ok = exit.unwrap_or(0) == 0;
                 self.ext.emit("job_done", &[("cmd", self.jobs.iter().find(|j| j.id == id).map(|j| j.cmd.clone()).unwrap_or_default()), ("status", exit.unwrap_or(0).to_string())]);
                 self.paint_job(&id);
@@ -2548,34 +2584,120 @@ impl Server {
         }
     }
 
-    /// Draws a job's line into its origin pane: ▸ and the command on the left, the status right.
+    /// Counts from the output and the z.job_column columns, freshly worked out.
+    fn refresh_job(&mut self, id: &str) {
+        let Some(j) = self.jobs.iter().find(|j| j.id == id) else { return };
+        let rows: Vec<String> = if j.end.is_some() {
+            j.kept.clone()
+        } else {
+            match (j.run.as_ref().and_then(|x| self.panes.get(x)), j.out) {
+                (Some(rp), Some((from, _))) => {
+                    let to = rp.abs_line() + 1;
+                    rp.rows_text(from.max(to - 5000), to)
+                }
+                _ => Vec::new(),
+            }
+        };
+        let counts = counts_of(&rows);
+        let (status, exit, secs) = match j.end {
+            None => ("running", String::new(), j.start.elapsed().as_secs_f64()),
+            Some((d, 0)) => ("ok", "0".into(), d.as_secs_f64()),
+            Some((d, c)) => ("failed", c.to_string(), d.as_secs_f64()),
+        };
+        let data = [("cmd", j.cmd.clone()), ("status", status.to_string()), ("exit", exit), ("seconds", format!("{secs:.1}")), ("place", j.place.clone()), ("cwd", j.cwd.display().to_string()), ("lines", rows.len().to_string())];
+        let extra = self.ext.job_columns(&data);
+        if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
+            j.counts = counts;
+            j.extra = extra;
+        }
+    }
+
+    /// Draws a job's line into its origin pane: ▸ and the command on the left; counts,
+    /// columns and the status right; buttons at the end.
     fn paint_job(&mut self, id: &str) {
         use alacritty_terminal::vte::ansi::NamedColor;
         let Some(j) = self.jobs.iter().find(|j| j.id == id) else { return };
         let (Some(line), Some(p)) = (j.line, self.panes.get(&j.origin)) else { return };
         let cols = p.cols as usize;
-        let status = j.status_text();
-        let color = match j.end {
-            None => NamedColor::Yellow,
-            Some((_, 0)) => NamedColor::Green,
-            Some(_) => NamedColor::Red,
+        let named = |t: char| match t {
+            'g' => Some(NamedColor::Green),
+            'b' => Some(NamedColor::Red),
+            'r' => Some(NamedColor::Yellow),
+            'a' => Some(NamedColor::Blue),
+            'm' => Some(NamedColor::BrightBlack),
+            _ => None,
         };
-        let where_ = if j.run.as_ref().is_some_and(|r| self.panes.contains_key(r)) { "" } else { " (pane closed)" };
-        let right = format!("{status}{where_}");
-        let rlen = right.chars().count();
-        let room = cols.saturating_sub(rlen + 4);
+        let buttons = j.buttons();
+        let bw = buttons.len() * 2 + 1;
+        // right to left: the status, then the columns before it
+        let mut right: Vec<(char, String)> = j.counts.iter().chain(j.extra.iter()).cloned().collect();
+        right.push((j.tone(), j.status_text()));
+        let mut x = cols.saturating_sub(bw);
+        let mut pieces = Vec::new();
+        for (tone, text) in right.iter().rev() {
+            let n = text.chars().count();
+            if x < n + 12 {
+                break;
+            }
+            x -= n;
+            pieces.push((x, text.clone(), named(*tone), false));
+            x -= 2;
+        }
+        let room = x.saturating_sub(3);
         let mut cmd: String = j.cmd.chars().take(room).collect();
         if j.cmd.chars().count() > room && room > 1 {
             cmd.pop();
             cmd.push('…');
         }
-        let pieces = vec![
-            (0, if j.open { "▾".to_string() } else { "▸".to_string() }, Some(NamedColor::Blue), true),
-            (2, cmd, None, false),
-            (cols.saturating_sub(rlen), right, Some(color), false),
-        ];
+        pieces.push((0, if j.open { "▾".to_string() } else { "▸".to_string() }, Some(NamedColor::Blue), true));
+        pieces.push((2, cmd, None, false));
+        for (i, (glyph, _)) in buttons.iter().enumerate() {
+            pieces.push((cols - bw + 1 + 2 * i, glyph.to_string(), Some(NamedColor::Blue), false));
+        }
         p.write_row(line, &pieces);
         self.dirty = true;
+    }
+
+    /// A job button: stop (Ctrl+C to it), rerun (same pane, same line), jump (to its pane).
+    fn job_action(&mut self, id: &str, what: &str) -> Result<(), String> {
+        let j = self.jobs.iter().find(|j| j.id == id).cloned().ok_or("no such job")?;
+        let run = j.run.clone().filter(|r| self.panes.contains_key(r));
+        match what {
+            "stop" => {
+                let r = run.ok_or("its pane is closed")?;
+                self.panes[&r].input(&[0x03]);
+            }
+            "rerun" => {
+                let r = run.ok_or("its pane is closed")?;
+                if j.end.is_none() {
+                    return Err("still running".into());
+                }
+                self.panes[&r].input(format!("cd {} && {}\r", shell_quote(&j.cwd.display().to_string()), j.cmd).as_bytes());
+                if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
+                    j.start = std::time::Instant::now();
+                    j.end = None;
+                    j.out = None;
+                    j.kept.clear();
+                    j.counts.clear();
+                    j.progress = None;
+                }
+                self.ticking.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            "jump" => {
+                let r = run.ok_or("its pane is closed")?;
+                let (sid, wi) = self.where_is(&r).ok_or("its pane is gone")?;
+                if let Some(s) = self.session_mut(&sid) {
+                    if s.active != wi {
+                        s.last = s.active;
+                        s.active = wi;
+                    }
+                }
+                self.focus_pane(&r);
+            }
+            other => return Err(format!("no job action {other}")),
+        }
+        self.paint_job(id);
+        Ok(())
     }
 
     /// The unfolded output under the open job lines of a pane on screen.
@@ -2621,13 +2743,28 @@ impl Server {
     }
 
     /// A click on a job's line folds or unfolds it; true when it was one.
-    fn click_job(&mut self, pane: &str, row: u16) -> bool {
+    fn click_job(&mut self, pane: &str, row: u16, col: u16) -> bool {
         let Some(p) = self.panes.get(pane) else { return false };
         let (hist, d) = {
             let t = p.term.lock();
             (t.grid().history_size() as i64, t.grid().display_offset() as i64)
         };
+        let cols = p.cols as usize;
         let Some(j) = self.jobs.iter_mut().find(|j| j.origin == pane && j.line.is_some_and(|l| l - hist + d == i64::from(row))) else { return false };
+        // the buttons at the end of the line
+        let buttons = j.buttons();
+        let bw = buttons.len() * 2 + 1;
+        let col = col as usize;
+        if col + bw >= cols + 1 && col > cols - bw {
+            let i = (col - (cols - bw + 1)) / 2;
+            if let Some((_, what)) = buttons.get(i.min(buttons.len() - 1)) {
+                let id = j.id.clone();
+                if let Err(e) = self.job_action(&id, what) {
+                    self.notice_all(e);
+                }
+                return true;
+            }
+        }
         j.open = !j.open;
         let id = j.id.clone();
         self.paint_job(&id);
@@ -2696,12 +2833,15 @@ impl Server {
                 if j.end.is_some() {
                     f.push(format!("m:{} lines", j.kept.len()));
                 }
-                let tone = match j.end {
-                    None => 'r',
-                    Some((_, 0)) => 'g',
-                    Some(_) => 'b',
-                };
-                f.push(format!("{tone}:{}", j.status_text()));
+                for (tone, text) in j.counts.iter().chain(j.extra.iter()) {
+                    f.push(format!("{tone}:{text}"));
+                }
+                f.push(format!("{}:{}", j.tone(), j.status_text()));
+                let buttons = j.buttons();
+                let bw = buttons.len() * 2 + 1;
+                for (i, (glyph, _)) in buttons.iter().enumerate() {
+                    f.push(format!("@:{}:{glyph}", r.w as usize - bw + 1 + 2 * i));
+                }
                 if let (None, Some(pr)) = (j.end, j.progress) {
                     f.push(format!("%:{pr:.3}"));
                 }
@@ -2709,5 +2849,68 @@ impl Server {
             }
         }
         items.join("\x1e")
+    }
+}
+
+/// Errors, warnings and test results in a command's output (cargo's and rustc's
+/// words, which most tools share): (tone, text) columns.
+fn counts_of(rows: &[String]) -> Vec<(char, String)> {
+    let (mut errors, mut warnings, mut passed, mut failed, mut tests) = (0, 0, 0, 0, false);
+    for l in rows {
+        let t = l.trim_start();
+        if (t.starts_with("error[") || t.starts_with("error:")) && !t.contains("could not compile") && !t.contains("aborting due to") && !t.contains("test failed") {
+            errors += 1;
+        } else if t.starts_with("warning:") && !t.contains(" generated ") && !t.contains("build failed") {
+            warnings += 1;
+        }
+        if let Some(r) = t.strip_prefix("test result: ") {
+            tests = true;
+            for part in r.split([';', '.']) {
+                let mut w = part.split_whitespace();
+                if let (Some(n), Some(what)) = (w.next().and_then(|n| n.parse::<u32>().ok()), w.next()) {
+                    match what {
+                        "passed" => passed += n,
+                        "failed" => failed += n,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    let plural = |n: u32, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+    let mut out = Vec::new();
+    if errors > 0 {
+        out.push(('b', plural(errors, "error")));
+    }
+    if warnings > 0 {
+        out.push(('r', plural(warnings, "warning")));
+    }
+    if tests {
+        out.push(('g', format!("{passed} passed")));
+        if failed > 0 {
+            out.push(('b', format!("{failed} failed")));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod count_tests {
+    #[test]
+    fn cargo_words() {
+        let rows: Vec<String> = [
+            "warning: unused variable: `x`",
+            "warning: `zeit` (bin \"zeit\") generated 1 warning",
+            "error[E0308]: mismatched types",
+            "error: could not compile `zeit` (lib) due to 1 previous error",
+            "test result: ok. 12 passed; 0 failed; 0 ignored",
+            "test result: FAILED. 3 passed; 1 failed; 0 ignored",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(super::counts_of(&rows), vec![('b', "1 error".into()), ('r', "1 warning".into()), ('g', "15 passed".into()), ('b', "1 failed".into())]);
+        assert_eq!(super::progress_of("   Building [=====>    ] 120/300: zeit"), Some(0.4));
+        assert_eq!(super::progress_of("downloading 45%"), Some(0.45));
     }
 }

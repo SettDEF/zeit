@@ -18,6 +18,8 @@ pub struct Look {
     pub bell: Color,
     pub accent: Color,
     pub icons: HashMap<String, String>,
+    /// the icon in the window-count pill (tmux.conf's status-left had one)
+    pub left_icon: String,
     pub history: usize,
     pub activity_on: bool,
 }
@@ -68,6 +70,7 @@ impl Look {
             bell: var("@error", Color::Indexed(1)),
             accent: var("@accent", Color::Indexed(4)),
             icons,
+            left_icon: opt("@left_icon").unwrap_or("\u{f2d0}").to_string(),
             history: opt("history-limit").and_then(|v| v.parse().ok()).unwrap_or(10_000),
             activity_on: matches!(opt("monitor-activity"), Some("on" | "true" | "1")),
         }
