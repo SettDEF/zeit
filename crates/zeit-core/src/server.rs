@@ -558,6 +558,12 @@ impl Server {
         self.panes.remove(pane);
         let _ = std::fs::remove_file(paths::pane_socket(pane));
         self.ext.emit("pane_exit", &[("pane", pane.to_string()), ("status", code.to_string())]);
+        self.unlink_pane(pane);
+    }
+
+    /// Takes a pane out of its window (the window goes when it was its last pane,
+    /// the session when it was its last window). The pane itself lives on.
+    fn unlink_pane(&mut self, pane: &str) {
         let Some((sid, wi)) = self.where_is(pane) else { return };
         let Some(s) = self.session_mut(&sid) else { return };
         let w = &mut s.windows[wi];
@@ -1700,6 +1706,48 @@ impl Server {
                 self.open_overlay(cid, Overlay::Choose { items, sel, template });
                 Ok(String::new())
             }
+            "break-pane" | "breakp" => {
+                let p = target.or(ctx).ok_or("no pane")?;
+                let (sid, wi) = self.where_is(&p).ok_or("no pane")?;
+                if self.session(&sid).unwrap().windows[wi].layout.ids().len() < 2 {
+                    return Err("break-pane: the window has only this pane".into());
+                }
+                self.unlink_pane(&p);
+                let name = args.iter().position(|a| a == "-n").and_then(|i| args.get(i + 1)).cloned();
+                let s = self.session_mut(&sid).ok_or("no session")?;
+                s.windows.push(Window { name: name.clone().unwrap_or_else(shell_name), layout: Layout::Leaf(p.clone()), focus: p, zoom: false, named: name.is_some() });
+                if !flag("-d") {
+                    s.last = s.active;
+                    s.active = s.windows.len() - 1;
+                }
+                self.layout_all();
+                self.save();
+                Ok(String::new())
+            }
+            "join-pane" | "joinp" | "move-pane" | "movep" => {
+                // -s the pane that moves (this one), -t where it goes (a pane or a window)
+                let src = args.iter().position(|a| a == "-s").and_then(|i| args.get(i + 1)).and_then(|t| self.resolve_target(t, ctx.as_deref().or(target.as_deref()))).or_else(|| ctx.clone()).or_else(|| cid.and_then(|c| self.client_pane(c))).or_else(|| {
+                    let s = self.sessions.last()?;
+                    Some(s.windows.get(s.active)?.focus.clone())
+                }).ok_or("no pane")?;
+                let dst = target.filter(|t| *t != src).ok_or("join-pane -t WHERE")?;
+                let (dsid, _) = self.where_is(&dst).ok_or("no target")?;
+                self.unlink_pane(&src);
+                let (dsid, dwi) = self.where_is(&dst).unwrap_or((dsid, 0));
+                let s = self.session_mut(&dsid).ok_or("no session")?;
+                let w = &mut s.windows[dwi];
+                if flag("-f") {
+                    w.layout.split_full(&src, flag("-h"), 0.5);
+                } else {
+                    w.layout.split(&dst, &src, flag("-h"));
+                }
+                if !flag("-d") {
+                    w.focus = src;
+                }
+                self.layout_all();
+                self.save();
+                Ok(String::new())
+            }
             "__keys" => {
                 // for the client: which keys are zeit's, and which repeat
                 let name = |c: &Chord| format!("{}{}{}", if c.ctrl { "C-" } else { "" }, if c.alt { "M-" } else { "" }, c.key);
@@ -1708,7 +1756,7 @@ impl Server {
                 out.extend(self.keys.table.iter().filter(|(_, b)| b.repeat).map(|(c, _)| format!("repeat {}", name(c))));
                 Ok(out.join("\n"))
             }
-            "display-panes" | "display-popup" | "popup" | "select-layout" | "next-layout" | "move-pane" | "join-pane" | "break-pane" => Err(format!("{cmd}: not in zeit yet")),
+            "display-panes" | "display-popup" | "popup" | "select-layout" | "next-layout" => Err(format!("{cmd}: not in zeit yet")),
             other => Err(format!("unknown command {other:?}")),
         }
     }
