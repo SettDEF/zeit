@@ -50,6 +50,22 @@ struct State {
     opts: BTreeMap<String, String>,
     /// z.tmux(false): leave tmux.conf alone, this config is the whole story
     no_tmux: bool,
+    /// z.zfloat(name, {…}): each zfloat's own settings, by its name
+    zfloats: HashMap<String, ZfloatOpts>,
+}
+
+/// A zfloat's own settings (z.zfloat): what a command line does not say comes from here.
+#[derive(Clone, Debug, Default)]
+pub struct ZfloatOpts {
+    pub width: Option<u16>,
+    pub height: Option<u16>,
+    pub side: Option<String>,
+    /// opened without taking the keys
+    pub below: Option<bool>,
+    /// the name on its frame
+    pub title: Option<String>,
+    /// the preset, hide and close buttons on its frame
+    pub buttons: Option<bool>,
 }
 
 pub struct Ext {
@@ -145,6 +161,11 @@ impl Ext {
                 self.errors.push(format!("init.lua: {e}"));
             }
         }
+    }
+
+    /// A zfloat's settings from the config (z.zfloat), empty when it has none.
+    pub fn zfloat_opts(&self, name: &str) -> ZfloatOpts {
+        self.st.borrow().zfloats.get(name).cloned().unwrap_or_default()
     }
 
     pub fn module(&self, name: &str) -> Option<Module> {
@@ -338,6 +359,20 @@ impl Ext {
         // z.map('<prefix>g', 'new-window lazygit' | function, { repeats = true })
         // keys: '<prefix>x' after the prefix, '<copy>y' in copy mode, plain 'M-j' always
         let st = self.st.clone();
+        // z.zfloat(name, { width, height, side, below, title, buttons }): a zfloat's own settings;
+        // called again (init.lua after a plugin), the fields it names win
+        let st2 = st.clone();
+        z.set("zfloat", lua.create_function(move |_, (name, o): (String, Table)| {
+            let mut s = st2.borrow_mut();
+            let e = s.zfloats.entry(name).or_default();
+            if let Some(v) = o.get::<Option<u16>>("width")? { e.width = Some(v); }
+            if let Some(v) = o.get::<Option<u16>>("height")? { e.height = Some(v); }
+            if let Some(v) = o.get::<Option<String>>("side")? { e.side = Some(v); }
+            if let Some(v) = o.get::<Option<bool>>("below")? { e.below = Some(v); }
+            if let Some(v) = o.get::<Option<String>>("title")? { e.title = Some(v); }
+            if let Some(v) = o.get::<Option<bool>>("buttons")? { e.buttons = Some(v); }
+            Ok(())
+        })?)?;
         z.set("map", lua.create_function(move |lua, (keys, action, opts): (String, Value, Option<Table>)| {
             let (table, k) = if let Some(rest) = keys.strip_prefix("<prefix>") {
                 ("prefix", rest.to_string())

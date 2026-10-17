@@ -12,6 +12,17 @@ A plugin for zeit and Claude Code, not a part of zeit: it talks to zeit only thr
 
 Outside zeit everything is silent.
 
+## Settings
+
+The view is the zfloat `claude`; its settings are zeit's (the plugin's `zeit/init.lua` sets
+them, your `init.lua` can change any):
+
+    z.zfloat('claude', { width = 25, side = 'left', title = 'AI', buttons = false })
+
+Every zfloat can have its own (`z.zfloat(name, {…})`): width, height, side, below (keeps
+the keys where they are), title, buttons. A drag or resize with the mouse holds until the
+config changes.
+
 ## Install
 
     ./install.sh                                   # zeit-claude and the zeit plugin

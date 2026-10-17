@@ -225,6 +225,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     s.rules_flag();
     s.restore();
     s.restore_popups();
+    s.apply_zfloat_opts();
     s.restore_floats();
     loop {
         let Ok(ev) = rx.recv() else { break };
@@ -1048,7 +1049,10 @@ impl Server {
         let zelt = match self.shown_popup(&sid) {
             Some(p) => {
                 let (o, _) = self.popup_rect(p);
-                format!("\x1b]7733;zfloat;id={};x={};y={};w={};h={};focus={};title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), p.name.replace([';', '\x07', '\x1b'], " "))
+                // its own title and whether it has buttons (z.zfloat), for zash's frame
+                let opts = self.ext.zfloat_opts(&p.name);
+                let title = opts.title.clone().unwrap_or_else(|| p.name.clone());
+                format!("\x1b]7733;zfloat;id={};x={};y={};w={};h={};focus={};buttons={};title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), u8::from(opts.buttons.unwrap_or(true)), title.replace([';', '\x07', '\x1b'], " "))
             }
             None => String::new(),
         };
@@ -1416,6 +1420,7 @@ impl Server {
                 self.ext = ext;
                 self.rules_flag();
                 self.layout_all();
+                self.apply_zfloat_opts();
                 Ok(format!("config reloaded ({n} plugins)"))
             }
             "lua" => self.ext.eval(&args.join(" ")),

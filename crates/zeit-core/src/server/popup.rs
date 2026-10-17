@@ -143,7 +143,7 @@ impl Server {
         let asked = args.iter().position(|a| a == "-s").and_then(|i| args.get(i + 1)).and_then(|n| self.find_session(n));
         let sid = asked.or_else(|| cid.and_then(|c| self.client_session(c))).or_else(|| ctx.as_deref().and_then(|p| self.where_is(p)).map(|w| w.0)).or_else(|| self.sessions.first().map(|s| s.id.clone())).ok_or("no session")?;
         // flags with values, then the command
-        let (mut name, mut w, mut h, mut dir, mut rest) = (None::<String>, 80u16, 80u16, None::<PathBuf>, Vec::new());
+        let (mut name, mut w, mut h, mut dir, mut rest) = (None::<String>, None::<u16>, None::<u16>, None::<PathBuf>, Vec::new());
         // -a SIDE: docked when made (right, left, top-right …); -B: the keys stay with the panes
         let (mut side, mut stay_below) = (None::<String>, false);
         let mut i = 0;
@@ -156,11 +156,11 @@ impl Server {
                     i += 2;
                 }
                 "-w" => {
-                    w = val().trim_end_matches('%').parse().unwrap_or(80);
+                    w = val().trim_end_matches('%').parse().ok();
                     i += 2;
                 }
                 "-h" => {
-                    h = val().trim_end_matches('%').parse().unwrap_or(80);
+                    h = val().trim_end_matches('%').parse().ok();
                     i += 2;
                 }
                 "-c" | "-d" => {
@@ -188,6 +188,11 @@ impl Server {
             }
         }
         let command = rest.join(" ");
+        // what the command line leaves out, this zfloat's own settings give (z.zfloat in the config)
+        let opts = self.ext.zfloat_opts(name.as_deref().unwrap_or(""));
+        let (w, h) = (w.or(opts.width).unwrap_or(80), h.or(opts.height).unwrap_or(80));
+        let side = side.or(opts.side.clone());
+        let stay_below = stay_below || opts.below.unwrap_or(false);
         let list = self.popups.get(&sid).cloned().unwrap_or_default();
         let named = |n: &str| list.iter().find(|p| p.name == n).cloned();
         match cmd {
@@ -369,10 +374,15 @@ impl Server {
         // the name on the frame, the others' names on its right
         let others: Vec<String> = self.popups.get(sid).map(|l| l.iter().filter(|o| o.pane != p.pane).map(|o| o.name.clone()).collect()).unwrap_or_default();
         let (tf, tb) = if below { (Color::Indexed(0), self.look.border) } else { (self.look.on_primary, self.look.primary) };
-        write_text(grid, outer.y as usize, outer.x as usize + 2, &format!(" {}{} ", p.name, if below { " · prefix Tab: up" } else { "" }), tf, tb, zeit_proto::BOLD);
+        // its own title and buttons, if its settings say so (z.zfloat)
+        let opts = self.ext.zfloat_opts(&p.name);
+        let title = opts.title.clone().unwrap_or_else(|| p.name.clone());
+        write_text(grid, outer.y as usize, outer.x as usize + 2, &format!(" {}{} ", title, if below { " · prefix Tab: up" } else { "" }), tf, tb, zeit_proto::BOLD);
         // the buttons on the right of the frame: presets ⌄, hide –, close ×
         let bx = (outer.x + outer.w).saturating_sub(9);
-        write_text(grid, outer.y as usize, bx as usize, " ⌄ – × ", fg, Color::Default, zeit_proto::BOLD);
+        if opts.buttons.unwrap_or(true) {
+            write_text(grid, outer.y as usize, bx as usize, " ⌄ – × ", fg, Color::Default, zeit_proto::BOLD);
+        }
         if !others.is_empty() {
             let more = format!(" {} ", others.join(" · "));
             let x = bx.saturating_sub(more.chars().count() as u16);
@@ -458,8 +468,8 @@ impl Server {
         }
         let Some(p) = self.shown_popup(sid).cloned() else { return false };
         let (outer, inner) = self.popup_rect(&p);
-        // the frame's buttons
-        if cy == outer.y {
+        // the frame's buttons (when it has them)
+        if cy == outer.y && self.ext.zfloat_opts(&p.name).buttons.unwrap_or(true) {
             let bx = (outer.x + outer.w).saturating_sub(9);
             let what = match cx.checked_sub(bx) {
                 Some(1) => Some("menu"),
@@ -499,5 +509,29 @@ impl Server {
         self.popup_below.remove(sid);
         self.dirty = true;
         true
+    }
+}
+
+impl Server {
+    /// The config changed: each zfloat takes its settings' size and side again (z.zfloat).
+    pub(super) fn apply_zfloat_opts(&mut self) {
+        let names: Vec<(String, String)> = self.popups.iter().flat_map(|(sid, l)| l.iter().map(|p| (sid.clone(), p.name.clone()))).collect();
+        for (sid, name) in names {
+            let o = self.ext.zfloat_opts(&name);
+            if let Some(p) = self.popups.get_mut(&sid).and_then(|l| l.iter_mut().find(|p| p.name == name)) {
+                if let Some(w) = o.width {
+                    p.w = w;
+                }
+                if let Some(h) = o.height {
+                    p.h = h;
+                }
+                if let Some(s) = &o.side {
+                    (p.dx, p.dy) = pinned(s);
+                }
+            }
+        }
+        self.layout_popups();
+        self.save_popups();
+        self.animate_popups();
     }
 }

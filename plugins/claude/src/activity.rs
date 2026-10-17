@@ -79,8 +79,8 @@ pub fn hook() {
     if event == "PreToolUse" {
         let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "zeit-claude".into());
         let viewer = format!("{exe} view {}", f.display());
-        let c = settings();
-        let w: Vec<String> = ["zfloat-show", "-n", "claude", "-w", &c.width, "-h", &c.height, "-a", &c.side, "-B", &viewer].iter().map(|s| s.to_string()).collect();
+        // its size, side and look are the zfloat "claude"'s settings in zeit's config (z.zfloat)
+        let w: Vec<String> = ["zfloat-show", "-n", "claude", &viewer].iter().map(|s| s.to_string()).collect();
         let _ = crate::zeit(&w);
     }
 }
@@ -218,29 +218,3 @@ pub fn view(path: &str) {
     }
 }
 
-/// The view's place and size: ~/.config/zeit/claude.conf (`width = 30`, `height = 100`,
-/// `side = right`), read on each call, so a change shows with Claude's next step.
-/// They apply when the view is made; a drag or a resize with the mouse is kept after.
-struct Settings {
-    width: String,
-    height: String,
-    side: String,
-}
-
-fn settings() -> Settings {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));
-    let text = std::fs::read_to_string(dir.join("zeit/claude.conf")).unwrap_or_default();
-    let mut s = Settings { width: "30".into(), height: "100".into(), side: "right".into() };
-    for line in text.lines().map(str::trim).filter(|l| !l.starts_with('#')) {
-        let Some((k, v)) = line.split_once('=') else { continue };
-        let v = v.split('#').next().unwrap_or("").trim().trim_matches('"').to_string();
-        match k.trim() {
-            "width" if v.parse::<u16>().is_ok() => s.width = v,
-            "height" if v.parse::<u16>().is_ok() => s.height = v,
-            "side" => s.side = v,
-            _ => {}
-        }
-    }
-    s
-}
