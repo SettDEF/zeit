@@ -28,11 +28,12 @@ Your shells keep running, and remember: a terminal multiplexer with tmux's keys.
   `select-layout` <name>     even-horizontal, even-vertical, main-*, tiled
   `web` [`-h`|`-v`] <address>    a pane that is a web page (drawn by zash)
 
-**Popups** (panes floating over the layout; they run while hidden):
-  `popup` [`-n` <name>] [`-w` %] [`-h` %] [<command>]   a new one (output stays when it ends)
-  `popup-toggle` [`-n` <name>] [<command>]   show or hide (made the first time)   prefix `f`
-  `popup-list`   choose one   prefix `F`      `popup-layer` [up|down]   keys to it or below   prefix `Tab`
-  `popup-move` `-U`|`-D`|`-L`|`-R` [n] | `-c`     `popup-next`   `popup-hide`   `popup-close`
+**Floats** (panes on a layer over the layout; they keep running while hidden):
+  `float` [`-n` <name>] [`-w` %] [`-h` %] [`-a` <side>] [`-B`] [<command>]   a new one (output stays when it ends)
+  `float-toggle` / `float-show` [`-n` <name>] [<command>]   show or hide / only show (made the first time)   prefix `f`
+  `float-list`   choose one   prefix `F`      `float-layer` [up|down]   keys to it or the panes below   prefix `Tab`
+  `float-align` center|top|right|bottom-left…   `float-move` `-U`|`-D`|`-L`|`-R` [n]   `float-hide`   `float-close`
+  mouse: drag the frame (or Alt+drag inside), Ctrl+drag or the corner resizes; tmux's `display-popup` works too
 
 **Jobs and history:**
   `timeline` [`-a`]            what this pane ran (-a: every pane)

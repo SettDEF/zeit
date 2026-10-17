@@ -118,11 +118,15 @@ impl Server {
         found
     }
 
-    /// `popup [-n NAME] [-w %] [-h %] [-c DIR] [-x] [COMMAND …]` and its friends.
+    /// `float [-n NAME] [-w %] [-h %] [-c DIR] [-a SIDE] [-B] [-s SESSION] [COMMAND …]` and its friends.
     pub(super) fn popup_command(&mut self, cid: Option<u64>, ctx: Option<String>, cmd: &str, args: &[String]) -> Reply {
-        let sid = cid.and_then(|c| self.client_session(c)).or_else(|| ctx.as_deref().and_then(|p| self.where_is(p)).map(|w| w.0)).or_else(|| self.sessions.first().map(|s| s.id.clone())).ok_or("no session")?;
+        // -s SESSION: for config hooks, which run without a client
+        let asked = args.iter().position(|a| a == "-s").and_then(|i| args.get(i + 1)).and_then(|n| self.find_session(n));
+        let sid = asked.or_else(|| cid.and_then(|c| self.client_session(c))).or_else(|| ctx.as_deref().and_then(|p| self.where_is(p)).map(|w| w.0)).or_else(|| self.sessions.first().map(|s| s.id.clone())).ok_or("no session")?;
         // flags with values, then the command
         let (mut name, mut w, mut h, mut dir, mut rest) = (None::<String>, 80u16, 80u16, None::<PathBuf>, Vec::new());
+        // -a SIDE: docked when made (right, left, top-right …); -B: the keys stay with the panes
+        let (mut side, mut stay_below) = (None::<String>, false);
         let mut i = 0;
         while i < args.len() {
             let a = args[i].as_str();
@@ -144,7 +148,16 @@ impl Server {
                     dir = Some(PathBuf::from(val()));
                     i += 2;
                 }
-                "-E" | "-EE" | "-B" => i += 1,
+                "-a" => {
+                    side = Some(val());
+                    i += 2;
+                }
+                "-s" => i += 2,
+                "-B" => {
+                    stay_below = true;
+                    i += 1;
+                }
+                "-E" | "-EE" => i += 1,
                 "--" => {
                     rest.extend(args[i + 1..].iter().cloned());
                     break;
@@ -159,13 +172,13 @@ impl Server {
         let list = self.popups.get(&sid).cloned().unwrap_or_default();
         let named = |n: &str| list.iter().find(|p| p.name == n).cloned();
         match cmd {
-            "popup-hide" => {
+            "float-hide" => {
                 self.popup_shown.remove(&sid);
                 self.popup_below.remove(&sid);
             }
             // popup-layer [up|down]: the keyboard to the popup (up) or the panes under it (down);
             // the popup stays in view either way
-            "popup-layer" => {
+            "float-layer" => {
                 if !self.popup_shown.contains_key(&sid) {
                     return Err("no popup shown (prefix f shows one)".into());
                 }
@@ -181,7 +194,7 @@ impl Server {
                 }
             }
             // popup-move -U|-D|-L|-R [N] (or -c: back to the middle)
-            "popup-move" => {
+            "float-move" => {
                 let shown = self.popup_shown.get(&sid).cloned().ok_or("no popup shown")?;
                 let area = self.area();
                 let n: i16 = rest.first().and_then(|v| v.parse().ok()).unwrap_or(2);
@@ -201,7 +214,7 @@ impl Server {
                 self.save_popups();
             }
             // popup-align center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right
-            "popup-align" => {
+            "float-align" => {
                 let shown = self.popup_shown.get(&sid).cloned().ok_or("no popup shown")?;
                 let area = self.area();
                 let to = rest.first().cloned().unwrap_or_else(|| "center".into());
@@ -210,29 +223,29 @@ impl Server {
                 let dx = if to.contains("left") { -ex } else if to.contains("right") { ex } else { 0 };
                 let dy = if to.contains("top") { -ey } else if to.contains("bottom") { ey } else { 0 };
                 if !matches!(to.as_str(), "center" | "centre" | "top" | "bottom" | "left" | "right" | "top-left" | "top-right" | "bottom-left" | "bottom-right") {
-                    return Err("popup-align center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right".into());
+                    return Err("float-align center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right".into());
                 }
                 if let Some(p) = self.popups.get_mut(&sid).and_then(|l| l.iter_mut().find(|p| p.pane == shown)) {
                     (p.dx, p.dy) = (dx, dy);
                 }
                 self.save_popups();
             }
-            "popup-close" => {
+            "float-close" => {
                 let target = name.as_deref().and_then(named).map(|p| p.pane).or_else(|| self.popup_shown.get(&sid).cloned()).ok_or("no popup shown")?;
                 if let Some(p) = self.panes.get(&target) {
                     p.hang_up();
                 }
             }
-            "popup-list" | "choose-popup" => {
+            "float-list" => {
                 if list.is_empty() {
                     return Err("no popups (prefix f makes one)".into());
                 }
                 let items = list.iter().map(|p| (format!("{}  {}", p.name, if p.cmd.is_empty() { "shell".to_string() } else { p.cmd.clone() }), p.name.clone())).collect();
                 if let Some(c) = cid {
-                    self.open_overlay(c, Overlay::Choose { items, sel: 0, template: Some("popup-toggle -n '%%'".into()) });
+                    self.open_overlay(c, Overlay::Choose { items, sel: 0, template: Some("float-toggle -n '%%'".into()) });
                 }
             }
-            "popup-next" => {
+            "float-next" => {
                 if list.is_empty() {
                     return Err("no popups".into());
                 }
@@ -242,7 +255,7 @@ impl Server {
             }
             // popup-toggle: show or hide one (made the first time); popup: always a new one
             _ => {
-                let existing = if cmd == "popup-toggle" {
+                let existing = if cmd == "float-toggle" || cmd == "float-show" {
                     match &name {
                         Some(n) => named(n),
                         None => self.popup_shown.get(&sid).and_then(|s| list.iter().find(|p| &p.pane == s).cloned()).or_else(|| list.last().cloned()),
@@ -251,13 +264,14 @@ impl Server {
                     None
                 };
                 match existing {
-                    Some(p) if self.popup_shown.get(&sid) == Some(&p.pane) => {
+                    // float-show never hides (a config hook calls it on every attach)
+                    Some(p) if cmd != "float-show" && self.popup_shown.get(&sid) == Some(&p.pane) => {
                         self.popup_shown.remove(&sid);
                         self.popup_below.remove(&sid);
                     }
                     Some(p) => {
                         self.popup_shown.insert(sid.clone(), p.pane);
-                        self.popup_below.remove(&sid);
+                        if stay_below { self.popup_below.insert(sid.clone()); } else { self.popup_below.remove(&sid); }
                     }
                     None => {
                         let here = ctx.clone().or_else(|| cid.and_then(|c| self.client_pane(c)));
@@ -277,10 +291,19 @@ impl Server {
                             n += 1;
                         }
                         let pane = self.start_pane(dir, argv)?;
-                        let p = Popup { pane: pane.clone(), name: label, cmd: command, w, h, dx: 0, dy: 0, ax: 0.0, ay: 0.0 };
+                        let mut p = Popup { pane: pane.clone(), name: label, cmd: command, w, h, dx: 0, dy: 0, ax: 0.0, ay: 0.0 };
+                        if let Some(s) = &side {
+                            // at that side from the start (no glide in from the middle)
+                            let area = self.area();
+                            let (pw, ph) = self.popup_size(&p);
+                            let (ex, ey) = (((area.w - pw) / 2) as i16, ((area.h - ph) / 2) as i16);
+                            p.dx = if s.contains("left") { -ex } else if s.contains("right") { ex } else { 0 };
+                            p.dy = if s.contains("top") { -ey } else if s.contains("bottom") { ey } else { 0 };
+                            (p.ax, p.ay) = (p.dx as f32, p.dy as f32);
+                        }
                         self.popups.entry(sid.clone()).or_default().push(p);
                         self.popup_shown.insert(sid.clone(), pane);
-                        self.popup_below.remove(&sid);
+                        if stay_below { self.popup_below.insert(sid.clone()); } else { self.popup_below.remove(&sid); }
                         self.layout_popups();
                         self.save_popups();
                     }
@@ -433,7 +456,7 @@ impl Server {
                     }
                     _ => {
                         let items = ["center", "top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right"].iter().map(|s| (s.replace('-', " "), s.to_string())).collect();
-                        self.open_overlay(cid, Overlay::Choose { items, sel: 0, template: Some("popup-align %%".into()) });
+                        self.open_overlay(cid, Overlay::Choose { items, sel: 0, template: Some("float-align %%".into()) });
                     }
                 }
                 self.dirty = true;

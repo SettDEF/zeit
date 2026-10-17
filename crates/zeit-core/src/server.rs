@@ -1013,13 +1013,13 @@ impl Server {
         let zelt = match self.shown_popup(&sid) {
             Some(p) => {
                 let (o, _) = self.popup_rect(p);
-                format!("\x1b]7733;zelt;id={};x={};y={};w={};h={};focus={};title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), p.name.replace([';', '\x07', '\x1b'], " "))
+                format!("\x1b]7733;float;id={};x={};y={};w={};h={};focus={};title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), p.name.replace([';', '\x07', '\x1b'], " "))
             }
             None => String::new(),
         };
         let old_zelt = self.clients.get_mut(&cid).map(|c| std::mem::replace(&mut c.last_zelt, zelt.clone())).unwrap_or_default();
         if zelt != old_zelt {
-            let msg = if zelt.is_empty() { "\x1b]7733;zeltclose;\x07".to_string() } else { zelt };
+            let msg = if zelt.is_empty() { "\x1b]7733;floatclose;\x07".to_string() } else { zelt };
             self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
         }
         let rows_msg = self.job_rows(&placed);
@@ -1794,7 +1794,15 @@ impl Server {
             out
         };
         match cmd {
-            "popup" | "display-popup" | "popup-toggle" | "popup-hide" | "popup-close" | "popup-list" | "choose-popup" | "popup-next" | "popup-layer" | "popup-move" | "popup-align" => self.popup_command(cid, ctx.clone().or(target.clone()), cmd, args),
+            // floats (panes on a layer over the layout); tmux's display-popup and the popup-* names are the same
+            c if c == "float" || c.starts_with("float-") || c == "display-popup" || c == "popup" || c.starts_with("popup-") || c == "float-list" => {
+                let name = match c {
+                    "display-popup" | "popup" => "float".to_string(),
+                    "float-list" => "float-list".to_string(),
+                    c => c.replacen("popup", "float", 1),
+                };
+                self.popup_command(cid, ctx.clone().or(target.clone()), &name, args)
+            }
             "if-shell" | "if" => {
                 let cond = positional.first().cloned().unwrap_or_default();
                 let yes = if flag("-F") {
