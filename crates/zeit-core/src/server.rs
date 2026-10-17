@@ -2542,6 +2542,7 @@ impl Server {
         if self.jobs.len() > 200 {
             self.jobs.remove(0);
         }
+        self.write_jobs_file();
         self.ticking.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(id)
     }
@@ -2575,6 +2576,7 @@ impl Server {
                     let cmd = self.jobs.iter().find(|j| j.id == id).map(|j| j.cmd.clone()).unwrap_or_default();
                     self.notice_all(format!("✗ {cmd}"));
                 }
+                self.notify_job(&id);
                 if !self.jobs.iter().any(|j| j.end.is_none()) {
                     self.ticking.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -2912,5 +2914,56 @@ mod count_tests {
         assert_eq!(super::counts_of(&rows), vec![('b', "1 error".into()), ('r', "1 warning".into()), ('g', "15 passed".into()), ('b', "1 failed".into())]);
         assert_eq!(super::progress_of("   Building [=====>    ] 120/300: zeit"), Some(0.4));
         assert_eq!(super::progress_of("downloading 45%"), Some(0.45));
+    }
+}
+
+impl Server {
+    /// A desktop notification when a job ends, as `job-notify` says: `long` (failed,
+    /// or 10 s and more; the default), `failed`, `all` or `off`.
+    fn notify_job(&mut self, id: &str) {
+        let Some(j) = self.jobs.iter().find(|j| j.id == id) else { return };
+        let Some((d, code)) = j.end else { return };
+        let when = self.keys.opts.get("job-notify").map(String::as_str).unwrap_or("long");
+        let long = d.as_secs() >= self.keys.opts.get("job-notify-after").and_then(|v| v.parse().ok()).unwrap_or(10);
+        let send = match when {
+            "off" => false,
+            "all" => true,
+            "failed" => code != 0,
+            _ => code != 0 || long,
+        };
+        self.write_jobs_file();
+        if !send {
+            return;
+        }
+        let title = format!("{} {}", if code == 0 { "✓" } else { "✗" }, j.cmd.chars().take(60).collect::<String>());
+        let mut body = vec![j.status_text()];
+        body.extend(j.counts.iter().map(|c| c.1.clone()));
+        let body = format!("{}\n{}", body.join(" · "), j.cwd.display());
+        let urgency = if code == 0 { "normal" } else { "critical" };
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("notify-send").args(["-a", "zeit", "-i", "utilities-terminal", "-u", urgency, &title, &body]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        });
+    }
+
+    /// `$XDG_RUNTIME_DIR/zeit/jobs.json`: the recent jobs, for the desktop (a bar chip).
+    fn write_jobs_file(&self) {
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ");
+        let items: Vec<String> = self.jobs.iter().rev().take(20).map(|j| {
+            let (state, exit, secs) = match j.end {
+                None => ("running", 0, j.start.elapsed().as_secs_f64()),
+                Some((d, 0)) => ("ok", 0, d.as_secs_f64()),
+                Some((d, c)) => ("failed", c, d.as_secs_f64()),
+            };
+            let counts: Vec<String> = j.counts.iter().map(|c| format!("\"{}\"", esc(&c.1))).collect();
+            format!(
+                "{{\"id\":\"{}\",\"cmd\":\"{}\",\"cwd\":\"{}\",\"state\":\"{state}\",\"exit\":{exit},\"seconds\":{secs:.1},\"progress\":{},\"counts\":[{}],\"pane\":\"{}\"}}",
+                j.id, esc(&j.cmd), esc(&j.cwd.display().to_string()), j.progress.map(|p| format!("{p:.3}")).unwrap_or_else(|| "null".into()), counts.join(","), j.origin
+            )
+        }).collect();
+        let path = paths::runtime_dir().join("jobs.json");
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, format!("[{}]\n", items.join(","))).is_ok() {
+            let _ = std::fs::rename(tmp, path);
+        }
     }
 }
