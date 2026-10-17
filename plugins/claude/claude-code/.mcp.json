@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "zeit": { "command": "zeit-claude", "args": ["mcp"] }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "zeit",
+  "owner": { "name": "caesar" },
+  "plugins": [
+    {
+      "name": "zeit-claude",
+      "source": "./claude-code",
+      "description": "What Claude runs shows live beside it in zeit, and Claude can open zfloats, web pages, floats and jobs in zeit and zash"
+    }
+  ]
+}

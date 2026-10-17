@@ -1,5 +1,5 @@
-//! What Claude Code runs, live beside it: `zeit claude-hook` (its hooks) notes each tool call,
-//! `zeit activity` draws them in a zfloat docked on the right.
+//! What Claude Code runs, live beside it: `zeit-claude hook` (its hooks) notes each tool call,
+//! `zeit-claude view` draws them in a zfloat docked on the right.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ fn now_ms() -> u64 {
 
 /// The activity file of one zeit pane (where that Claude runs).
 fn file_for(pane: &str) -> PathBuf {
-    zeit_core::paths::state_dir().join("claude").join(format!("{pane}.jsonl"))
+    crate::state_dir().join("claude").join(format!("{pane}.jsonl"))
 }
 
 /// What a tool call is about, in a line: the command, the file, the pattern…
@@ -28,7 +28,7 @@ fn summary(tool: &str, input: &serde_json::Value) -> String {
     }
 }
 
-/// `zeit claude-hook`: Claude Code's hook (PreToolUse, PostToolUse, Stop, UserPromptSubmit).
+/// `zeit-claude hook`: Claude Code's hook (PreToolUse, PostToolUse, Stop, UserPromptSubmit).
 /// Quiet and quick: it never prints (Claude would read it) and gives up rather than wait.
 pub fn hook() {
     let Some(pane) = std::env::var("ZEIT_PANE").ok().filter(|p| !p.is_empty()) else { return };
@@ -77,14 +77,10 @@ pub fn hook() {
     }
     // the view on the right, beside this Claude (the keys stay with Claude)
     if event == "PreToolUse" {
-        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "zeit".into());
-        let viewer = format!("{exe} activity {}", f.display());
-        let _ = std::process::Command::new(&exe)
-            .args(["zfloat-show", "-n", "claude", "-w", "38", "-h", "100", "-a", "right", "-B", &viewer])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "zeit-claude".into());
+        let viewer = format!("{exe} view {}", f.display());
+        let w: Vec<String> = ["zfloat-show", "-n", "claude", "-w", "38", "-h", "100", "-a", "right", "-B", &viewer].iter().map(|s| s.to_string()).collect();
+        let _ = crate::zeit(&w);
     }
 }
 
@@ -153,7 +149,7 @@ fn secs(ms: u64) -> String {
     if ms < 1000 { format!("{ms} ms") } else if ms < 60_000 { format!("{:.1} s", ms as f64 / 1000.0) } else { format!("{}m{:02}s", ms / 60_000, (ms / 1000) % 60) }
 }
 
-/// `zeit activity FILE`: the view. Redraws when the file changes, and while something runs.
+/// `zeit-claude view FILE`: the view. Redraws when the file changes, and while something runs.
 pub fn view(path: &str) {
     let path = PathBuf::from(path);
     print!("\x1b[?25l\x1b[?7l");

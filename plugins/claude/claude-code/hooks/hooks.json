@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "zeit-claude hook", "timeout": 3 }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "zeit-claude hook", "timeout": 3 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "zeit-claude hook", "timeout": 3 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "zeit-claude hook", "timeout": 3 }] }]
+  }
+}
