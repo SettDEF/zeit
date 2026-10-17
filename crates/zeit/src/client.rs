@@ -36,7 +36,8 @@ impl Raw {
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) };
         // alternate screen, bracketed paste and focus events passed through
         // alternate screen; the mouse always (click a pane, the wheel scrolls back)
-        print!("\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[H\x1b[2J");
+        // and the terminal around it (zash) leaves the multiplexer keys to zeit
+        print!("\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[H\x1b[2J\x1b]7733;keys;all\x07");
         let _ = std::io::stdout().flush();
         Some(Raw(old))
     }
@@ -44,7 +45,7 @@ impl Raw {
 
 impl Drop for Raw {
     fn drop(&mut self) {
-        print!("\x1b]7733;rows;\x07\x1b[0m\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[?25h\x1b[0 q\x1b[?1049l");
+        print!("\x1b]7733;keys;none\x07\x1b]7733;rows;\x07\x1b[0m\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[?25h\x1b[0 q\x1b[?1049l");
         let _ = std::io::stdout().flush();
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.0) };
     }

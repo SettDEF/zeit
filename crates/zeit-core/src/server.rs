@@ -109,6 +109,8 @@ pub struct Server {
     last_search: Option<(String, bool)>,
     /// which preset layout a window is on (for next-layout), by its panes
     layout_at: HashMap<String, usize>,
+    /// keys a pane's program claimed (OSC 7733;keys): all, or these chords
+    claims: HashMap<String, (bool, HashSet<String>)>,
     /// the command each pane runs right now (from the shell's OSC 7733;cmd)
     running: HashMap<String, Running>,
     /// what each pane ran, recently (the file keeps more)
@@ -155,7 +157,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -283,6 +285,23 @@ impl Server {
             Ev::Pane(PaneEvent::Mark { pane, kind, exit, line }) => {
                 self.history_mark(&pane, kind, exit, line);
                 self.job_mark(&pane, kind, exit, line);
+            }
+            Ev::Pane(PaneEvent::Keys { pane, msg }) => {
+                let c = self.claims.entry(pane).or_default();
+                match msg.as_str() {
+                    "all" => c.0 = true,
+                    "none" => *c = (false, HashSet::new()),
+                    m => {
+                        let list = |s: &str| s.split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect::<Vec<_>>();
+                        if let Some(l) = m.strip_prefix("claim=") {
+                            c.1.extend(list(l));
+                        } else if let Some(l) = m.strip_prefix("release=") {
+                            for k in list(l) {
+                                c.1.remove(&k);
+                            }
+                        }
+                    }
+                }
             }
             Ev::Pane(PaneEvent::Cmd { pane, text }) => {
                 let cwd = self.panes.get(&pane).map(|p| p.cwd().display().to_string()).unwrap_or_default();
@@ -622,6 +641,7 @@ impl Server {
 
     fn pane_gone(&mut self, pane: &str, code: i32) {
         self.panes.remove(pane);
+        self.claims.remove(pane);
         let _ = std::fs::remove_file(paths::pane_socket(pane));
         self.ext.emit("pane_exit", &[("pane", pane.to_string()), ("status", code.to_string())]);
         self.unlink_pane(pane);
@@ -1216,6 +1236,24 @@ impl Server {
 
     /// A key the client handed over (after the prefix, or a no-prefix binding).
     fn key(&mut self, cid: Option<u64>, table: &str, key: &Chord, ctx: Option<String>) {
+        // a key the focused pane's program claimed is its own (Neovim's M-h, a game's keys)
+        let name = |c: &Chord| format!("{}{}{}", if c.ctrl { "C-" } else { "" }, if c.alt { "M-" } else { "" }, c.key);
+        if let Some(p) = cid.and_then(|c| self.client_pane(c)) {
+            if let Some((all, keys)) = self.claims.get(&p) {
+                let prefix_claimed = table == "prefix" && (*all || keys.contains(&name(&self.keys.prefix)));
+                if (table == "root" && (*all || keys.contains(&name(key)))) || prefix_claimed {
+                    if let Some(pane) = self.panes.get(&p) {
+                        let mut bytes = Vec::new();
+                        if prefix_claimed {
+                            bytes.extend(crate::keys::chord_to_bytes(&self.keys.prefix));
+                        }
+                        bytes.extend(crate::keys::chord_to_bytes(key));
+                        pane.input(&bytes);
+                    }
+                    return;
+                }
+            }
+        }
         // Lua first: a plugin or init.lua may bind any key
         if self.ext.key(table, key) {
             for line in self.ext.take_commands() {
