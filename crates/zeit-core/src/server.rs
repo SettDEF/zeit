@@ -1834,6 +1834,19 @@ impl Server {
                 let id = self.start_job(&origin, line, &place, size, cwd)?;
                 Ok(format!("routed {id}"))
             }
+            "job-run" => {
+                // a job started by a program (zett's compile): no shell line, the bar and a note show it
+                let origin = ctx.clone().or(target.clone()).ok_or("job-run: from a zeit pane")?;
+                let val = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
+                let line = args.iter().skip_while(|a| *a != "--").skip(1).cloned().collect::<Vec<_>>().join(" ");
+                if line.trim().is_empty() {
+                    return Err("job-run [-c DIR] [-p bottom|right|window] -- COMMAND".into());
+                }
+                let cwd = val("-c").map(PathBuf::from).or_else(|| self.panes.get(&origin).map(|p| p.cwd())).unwrap_or_default();
+                let place = val("-p").unwrap_or_else(|| "bottom".into());
+                let id = self.start_job(&origin, line, &place, None, cwd)?;
+                Ok(id)
+            }
             "job-toggle" => {
                 let p = target.or(ctx).ok_or("no pane")?;
                 let j = self.jobs.iter_mut().rev().find(|j| j.origin == p && j.line.is_some()).ok_or("no job line in this pane")?;
