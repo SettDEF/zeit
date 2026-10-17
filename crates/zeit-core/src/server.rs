@@ -13,6 +13,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 mod floats;
 mod keysview;
+mod tree;
 mod popup;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
@@ -80,6 +81,8 @@ enum Overlay {
     Panes,
     /// a pane's timeline: its commands, newest first; `view` scrolls one's output
     Timeline { pane: String, items: Vec<crate::history::Entry>, sel: usize, view: Option<usize> },
+    /// choose-tree: the whole screen, the tree on top and the chosen one's panes below
+    Tree(tree::TreeState),
 }
 
 #[derive(Clone, Debug)]
@@ -2067,9 +2070,9 @@ impl Server {
             }
             "choose-tree" | "choose-window" | "choose-session" => {
                 let cid = cid.ok_or("choose-tree needs an attached client")?;
-                let (items, sel) = self.tree_items(flag("-s") || cmd == "choose-session");
                 let template = positional.last().cloned();
-                self.open_overlay(cid, Overlay::Choose { items, sel, template });
+                let st = self.tree_open(cid, flag("-s") || cmd == "choose-session", template);
+                self.open_overlay(cid, Overlay::Tree(st));
                 Ok(String::new())
             }
             "break-pane" | "breakp" => {
@@ -2630,6 +2633,11 @@ impl Server {
                         _ => {}
                     }
                 }
+                Overlay::Tree(st) => {
+                    let (k2, r) = self.tree_key(cid, &k, st);
+                    keep = k2;
+                    run = r;
+                }
                 Overlay::Choose { items, sel, template } => {
                     let last = items.len().saturating_sub(1);
                     match (k.ctrl, k.key.as_str()) {
@@ -2763,30 +2771,6 @@ impl Server {
     }
 
     /// choose-tree's rows: every session, and its windows under it.
-    fn tree_items(&self, sessions_only: bool) -> (Vec<(String, String)>, usize) {
-        let mut items = Vec::new();
-        let mut sel = 0;
-        let here = self.clients.values().find_map(|c| c.session.clone());
-        for s in &self.sessions {
-            let attached = self.clients.values().filter(|c| c.session.as_deref() == Some(&s.id)).count();
-            if here.as_deref() == Some(&s.id) && sessions_only {
-                sel = items.len();
-            }
-            items.push((format!("{}  {} windows{}", s.name, s.windows.len(), if attached > 0 { "  (attached)" } else { "" }), format!("{}:", s.name)));
-            if sessions_only {
-                continue;
-            }
-            for (i, w) in s.windows.iter().enumerate() {
-                if here.as_deref() == Some(&s.id) && i == s.active {
-                    sel = items.len();
-                }
-                let panes = w.layout.ids().len();
-                items.push((format!("  {i}: {}{}", self.window_title(w), if panes > 1 { format!("  ({panes} panes)") } else { String::new() }), format!("{}:{i}", s.name)));
-            }
-        }
-        (items, sel)
-    }
-
     /// The overlay over the screen: the input line on the status row, the picker in a box.
     fn draw_overlay(&self, o: &Overlay, grid: &mut [Vec<Cell>], status_row: usize, area: Rect) -> Option<(u16, u16)> {
         let l = &self.look;
@@ -2797,6 +2781,10 @@ impl Server {
                 None
             }
             Overlay::Panes => None,
+            Overlay::Tree(st) => {
+                self.draw_tree_view(st, grid, area);
+                None
+            }
             Overlay::Prompt { label, text, cur, .. } => {
                 write_text(grid, status_row, 0, &" ".repeat(cols), l.status_fg, l.status_bg, 0);
                 write_text(grid, status_row, 0, "\u{e0b6}", l.primary, l.status_bg, 0);

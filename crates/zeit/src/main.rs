@@ -33,6 +33,10 @@ Your shells keep running, and remember: a terminal multiplexer with tmux's keys.
   `float-embed`   a float into the layout, or the focused pane out of it   prefix `E`      `float-next`   `float-close`
   mouse: a click brings a float up, drag its frame (or Alt+drag), Ctrl+drag or the corner resizes
 
+**Session menu** (prefix s, w: choose-tree as tmux shows it, the whole screen): the tree on top
+  (0-9 picks, ←→ fold, x kill, v preview), the chosen one's panes live below.
+  z.set('@tree-preview', 'off')   z.set('@tree-height', 40)   (% of the screen for the tree)
+
 **zfloats** (panes on their own layer over the layout; they keep running while hidden):
   `zfloat` [`-n` <name>] [`-w` %] [`-h` %] [`-a` <side>] [`-B`] [<command>]   a new one (output stays when it ends)
   `zfloat-toggle` / `zfloat-show` [`-n` <name>] [<command>]   show or hide / only show (made the first time)   prefix `f`
