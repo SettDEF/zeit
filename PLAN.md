@@ -22,9 +22,24 @@ modules too, so a feature of zeit and a plugin look the same.
 ```lua
 -- ~/.config/zeit/init.lua
 local z = require('zeit')
+
+-- the features, as a list (like Doom's init.el): a word turns one on, +flags
+-- switch its parts, a -- in front turns it off again
+z.modules {
+  'hintbar',                   -- modes with a bar showing the keys
+  'frames +rounded +names',
+  'floating +popout +overlay +blur',
+  'welcome',
+  'timeline +scrub',
+  'palette',
+  -- 'stacked',
+  -- 'layouts +auto',
+}
+
+-- details, only where wanted: the same modules, configured
 z.prefix('C-Space')                 -- or keep tmux.conf's
 
-require('zeit.hintbar').setup()     -- modes with a bar showing the keys
+require('zeit.hintbar').setup()     -- (setup with nothing = the defaults)
 require('zeit.frames').setup { names = true, rounded = true }
 require('zeit.floating').setup {
   radius = 14, shadow = true, blur = 10,
@@ -39,8 +54,9 @@ z.on('pane_exit', function(p) if p.status ~= 0 then z.notify(p.title .. ' failed
 z.map('n', '<prefix>g', function() z.float { cmd = 'lazygit', popout = true } end)
 ```
 
-- Modules have defaults, so `setup()` with nothing works; every option can be
-  changed later and reloads live.
+- The list is the quick way (one word per feature, flags with `+`); `setup{…}`
+  is the detailed way; both may be used together, `setup` wins. Modules have
+  defaults, so a word in the list is enough; every option reloads live.
 - `:checkhealth`-style `zeit doctor` shows which modules are on, what they
   cost (memory, wakeups) and any errors in init.lua.
 - Plugins come from a folder or a git URL, pinned in a lockfile (as zett's).
