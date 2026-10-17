@@ -172,13 +172,13 @@ impl Server {
         let list = self.popups.get(&sid).cloned().unwrap_or_default();
         let named = |n: &str| list.iter().find(|p| p.name == n).cloned();
         match cmd {
-            "float-hide" => {
+            "zfloat-hide" => {
                 self.popup_shown.remove(&sid);
                 self.popup_below.remove(&sid);
             }
             // popup-layer [up|down]: the keyboard to the popup (up) or the panes under it (down);
             // the popup stays in view either way
-            "float-layer" => {
+            "zfloat-layer" => {
                 if !self.popup_shown.contains_key(&sid) {
                     return Err("no popup shown (prefix f shows one)".into());
                 }
@@ -194,7 +194,7 @@ impl Server {
                 }
             }
             // popup-move -U|-D|-L|-R [N] (or -c: back to the middle)
-            "float-move" => {
+            "zfloat-move" => {
                 let shown = self.popup_shown.get(&sid).cloned().ok_or("no popup shown")?;
                 let area = self.area();
                 let n: i16 = rest.first().and_then(|v| v.parse().ok()).unwrap_or(2);
@@ -214,7 +214,7 @@ impl Server {
                 self.save_popups();
             }
             // popup-align center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right
-            "float-align" => {
+            "zfloat-align" => {
                 let shown = self.popup_shown.get(&sid).cloned().ok_or("no popup shown")?;
                 let area = self.area();
                 let to = rest.first().cloned().unwrap_or_else(|| "center".into());
@@ -223,29 +223,29 @@ impl Server {
                 let dx = if to.contains("left") { -ex } else if to.contains("right") { ex } else { 0 };
                 let dy = if to.contains("top") { -ey } else if to.contains("bottom") { ey } else { 0 };
                 if !matches!(to.as_str(), "center" | "centre" | "top" | "bottom" | "left" | "right" | "top-left" | "top-right" | "bottom-left" | "bottom-right") {
-                    return Err("float-align center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right".into());
+                    return Err("zfloat-align center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right".into());
                 }
                 if let Some(p) = self.popups.get_mut(&sid).and_then(|l| l.iter_mut().find(|p| p.pane == shown)) {
                     (p.dx, p.dy) = (dx, dy);
                 }
                 self.save_popups();
             }
-            "float-close" => {
+            "zfloat-close" => {
                 let target = name.as_deref().and_then(named).map(|p| p.pane).or_else(|| self.popup_shown.get(&sid).cloned()).ok_or("no popup shown")?;
                 if let Some(p) = self.panes.get(&target) {
                     p.hang_up();
                 }
             }
-            "float-list" => {
+            "zfloat-list" => {
                 if list.is_empty() {
                     return Err("no popups (prefix f makes one)".into());
                 }
                 let items = list.iter().map(|p| (format!("{}  {}", p.name, if p.cmd.is_empty() { "shell".to_string() } else { p.cmd.clone() }), p.name.clone())).collect();
                 if let Some(c) = cid {
-                    self.open_overlay(c, Overlay::Choose { items, sel: 0, template: Some("float-toggle -n '%%'".into()) });
+                    self.open_overlay(c, Overlay::Choose { items, sel: 0, template: Some("zfloat-toggle -n '%%'".into()) });
                 }
             }
-            "float-next" => {
+            "zfloat-next" => {
                 if list.is_empty() {
                     return Err("no popups".into());
                 }
@@ -255,7 +255,7 @@ impl Server {
             }
             // popup-toggle: show or hide one (made the first time); popup: always a new one
             _ => {
-                let existing = if cmd == "float-toggle" || cmd == "float-show" {
+                let existing = if cmd == "zfloat-toggle" || cmd == "zfloat-show" {
                     match &name {
                         Some(n) => named(n),
                         None => self.popup_shown.get(&sid).and_then(|s| list.iter().find(|p| &p.pane == s).cloned()).or_else(|| list.last().cloned()),
@@ -264,8 +264,8 @@ impl Server {
                     None
                 };
                 match existing {
-                    // float-show never hides (a config hook calls it on every attach)
-                    Some(p) if cmd != "float-show" && self.popup_shown.get(&sid) == Some(&p.pane) => {
+                    // zfloat-show never hides (a config hook calls it on every attach)
+                    Some(p) if cmd != "zfloat-show" && self.popup_shown.get(&sid) == Some(&p.pane) => {
                         self.popup_shown.remove(&sid);
                         self.popup_below.remove(&sid);
                     }
@@ -456,7 +456,7 @@ impl Server {
                     }
                     _ => {
                         let items = ["center", "top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right"].iter().map(|s| (s.replace('-', " "), s.to_string())).collect();
-                        self.open_overlay(cid, Overlay::Choose { items, sel: 0, template: Some("float-align %%".into()) });
+                        self.open_overlay(cid, Overlay::Choose { items, sel: 0, template: Some("zfloat-align %%".into()) });
                     }
                 }
                 self.dirty = true;

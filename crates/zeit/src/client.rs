@@ -52,7 +52,7 @@ impl Drop for Raw {
                 print!("\x1b]7733;webhide;id={id}\x07");
             }
         }
-        print!("\x1b]7733;keys;none\x07\x1b]7733;floatclose;\x07\x1b]7733;rows;\x07\x1b[0m\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[?25h\x1b[0 q\x1b[?1049l");
+        print!("\x1b]7733;keys;none\x07\x1b]7733;zfloatclose;\x07\x1b]7733;rows;\x07\x1b[0m\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[?25h\x1b[0 q\x1b[?1049l");
         let _ = std::io::stdout().flush();
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.0) };
     }
