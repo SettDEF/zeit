@@ -12,8 +12,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use zeit_proto::{read_msg, write_msg, HolderMsg, ToHolder, VERSION};
 
-/// Output kept while no server listens.
-const KEEP: usize = 4 << 20;
+/// The latest output, always kept: a server that (re)connects replays it, so its
+/// emulator shows the screen and scrollback as they were.
+const KEEP: usize = 1 << 20;
 
 /// Environment variables of other multiplexers and terminals: never passed on.
 const FOREIGN: &[&str] = &["TMUX", "TMUX_PANE", "ZELLIJ", "ZELLIJ_SESSION_NAME", "STY", "WEZTERM_PANE", "KITTY_WINDOW_ID"];
@@ -117,11 +118,10 @@ fn serve(listener: UnixListener, master: OwnedFd, child: libc::pid_t) -> std::io
             if let Ok((mut c, _)) = listener.accept() {
                 let ok = write_msg(&mut c, &HolderMsg::Hello { version: VERSION, pid: child as u32 }).is_ok();
                 if ok {
-                    // what was printed while nobody listened
+                    // the latest output, so the new server rebuilds the screen
                     if !kept.is_empty() {
                         let (a, b) = kept.as_slices();
                         let all = [a, b].concat();
-                        kept.clear();
                         let _ = write_msg(&mut c, &HolderMsg::Output(all));
                     }
                     client = Some(c);
@@ -132,13 +132,14 @@ fn serve(listener: UnixListener, master: OwnedFd, child: libc::pid_t) -> std::io
         if fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
             match pty.read(&mut buf) {
                 Ok(n) if n > 0 => {
+                    kept.extend(&buf[..n]);
+                    if kept.len() > KEEP {
+                        let extra = kept.len() - KEEP;
+                        kept.drain(..extra);
+                    }
                     let sent = client.as_mut().is_some_and(|c| write_msg(c, &HolderMsg::Output(buf[..n].to_vec())).is_ok());
                     if !sent {
                         client = None;
-                        kept.extend(&buf[..n]);
-                        while kept.len() > KEEP {
-                            kept.pop_front();
-                        }
                     }
                 }
                 // EIO: every end of the slave is closed, the shell is gone

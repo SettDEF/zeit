@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 zeit-proto.workspace = true
 serde.workspace = true
+postcard.workspace = true
 alacritty_terminal.workspace = true
 mlua.workspace = true
 libc.workspace = true

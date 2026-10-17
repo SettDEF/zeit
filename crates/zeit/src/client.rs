@@ -1,0 +1,208 @@
+//! The text client: zeit in any terminal, like tmux.
+
+use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+use zeit_core::keys::{chord_from_bytes, Chord, Keys};
+use zeit_proto::{read_msg, write_msg, Cell, ClientMsg, Color, CursorShape, ServerMsg};
+
+static RESIZED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_winch(_: libc::c_int) {
+    RESIZED.store(true, Ordering::Relaxed);
+}
+
+fn size() -> (u16, u16) {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    if unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 {
+        (ws.ws_col, ws.ws_row)
+    } else {
+        (80, 24)
+    }
+}
+
+struct Raw(libc::termios);
+
+impl Raw {
+    fn enter() -> Option<Raw> {
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(0, &mut t) } != 0 {
+            return None;
+        }
+        let old = t;
+        unsafe { libc::cfmakeraw(&mut t) };
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) };
+        // alternate screen, bracketed paste and focus events passed through
+        print!("\x1b[?1049h\x1b[?2004h\x1b[H\x1b[2J");
+        let _ = std::io::stdout().flush();
+        Some(Raw(old))
+    }
+}
+
+impl Drop for Raw {
+    fn drop(&mut self) {
+        print!("\x1b[0m\x1b[?2004l\x1b[?25h\x1b[0 q\x1b[?1049l");
+        let _ = std::io::stdout().flush();
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.0) };
+    }
+}
+
+fn sgr(out: &mut String, c: &Cell) {
+    out.push_str("\x1b[0");
+    let f = c.flags;
+    if f & zeit_proto::BOLD != 0 { out.push_str(";1"); }
+    if f & zeit_proto::DIM != 0 { out.push_str(";2"); }
+    if f & zeit_proto::ITALIC != 0 { out.push_str(";3"); }
+    if f & zeit_proto::UNDERLINE != 0 { out.push_str(";4"); }
+    if f & zeit_proto::REVERSE != 0 { out.push_str(";7"); }
+    if f & zeit_proto::STRIKE != 0 { out.push_str(";9"); }
+    match c.fg {
+        Color::Default => {}
+        Color::Indexed(i) if i < 8 => out.push_str(&format!(";{}", 30 + i)),
+        Color::Indexed(i) if i < 16 => out.push_str(&format!(";{}", 90 + i - 8)),
+        Color::Indexed(i) => out.push_str(&format!(";38;5;{i}")),
+        Color::Rgb(r, g, b) => out.push_str(&format!(";38;2;{r};{g};{b}")),
+    }
+    match c.bg {
+        Color::Default => {}
+        Color::Indexed(i) if i < 8 => out.push_str(&format!(";{}", 40 + i)),
+        Color::Indexed(i) if i < 16 => out.push_str(&format!(";{}", 100 + i - 8)),
+        Color::Indexed(i) => out.push_str(&format!(";48;5;{i}")),
+        Color::Rgb(r, g, b) => out.push_str(&format!(";48;2;{r};{g};{b}")),
+    }
+    out.push('m');
+}
+
+/// Shows a session in this terminal until detached or ended.
+pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<String>) -> Result<String, String> {
+    // the prefix, as the server knows it (tmux.conf, or z.prefix in init.lua)
+    let prefix = {
+        write_msg(&mut sock, &ClientMsg::Command(vec!["show-prefix".into()])).map_err(|e| e.to_string())?;
+        match read_msg::<_, ServerMsg>(&mut sock) {
+            Ok(ServerMsg::Reply { ok: true, text }) => Chord::parse(&text),
+            _ => None,
+        }
+    };
+    let mut keys = Keys::load();
+    if let Some(p) = prefix {
+        keys.prefix = p;
+    }
+    let (cols, rows) = size();
+    write_msg(&mut sock, &ClientMsg::Attach { session, place, cols, rows }).map_err(|e| e.to_string())?;
+    let raw = Raw::enter().ok_or("not a terminal")?;
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_winch as *const () as usize;
+        libc::sigaction(libc::SIGWINCH, &sa, std::ptr::null_mut());
+    }
+    // the server's frames, drawn as they come
+    let mut reader = sock.try_clone().map_err(|e| e.to_string())?;
+    let drawer = std::thread::spawn(move || -> String {
+        let mut stdout = std::io::stdout().lock();
+        loop {
+            match read_msg::<_, ServerMsg>(&mut reader) {
+                Ok(ServerMsg::Frame(f)) => {
+                    let mut out = String::with_capacity(f.changed.len() * (f.cols as usize + 16));
+                    out.push_str("\x1b[?25l");
+                    for (r, row) in &f.changed {
+                        out.push_str(&format!("\x1b[{};1H", r + 1));
+                        let mut last: Option<(Color, Color, u8)> = None;
+                        for c in row {
+                            if c.flags & zeit_proto::SPACER != 0 {
+                                continue;
+                            }
+                            let style = (c.fg, c.bg, c.flags);
+                            if last != Some(style) {
+                                sgr(&mut out, c);
+                                last = Some(style);
+                            }
+                            out.push_str(&c.text);
+                        }
+                    }
+                    out.push_str("\x1b[0m");
+                    out.push_str(&format!("\x1b]2;{}\x07", f.title.replace(['\x07', '\x1b'], "")));
+                    match (f.cursor, f.cursor_shape) {
+                        (Some((x, y)), shape) if shape != CursorShape::Hidden => {
+                            let n = match shape {
+                                CursorShape::Beam => 6,
+                                CursorShape::Underline => 4,
+                                _ => 2,
+                            };
+                            out.push_str(&format!("\x1b[{n} q\x1b[{};{}H\x1b[?25h", y + 1, x + 1));
+                        }
+                        _ => {}
+                    }
+                    let _ = stdout.write_all(out.as_bytes());
+                    let _ = stdout.flush();
+                }
+                Ok(ServerMsg::Bye { reason }) => return reason,
+                Ok(_) => {}
+                Err(_) => return "the server went away".into(),
+            }
+        }
+    });
+    // keys: the prefix and zeit's bindings are zeit's, everything else is the program's
+    let mut writer = sock;
+    let mut buf = [0u8; 4096];
+    let mut waiting = false;
+    let mut repeat_until: Option<Instant> = None;
+    loop {
+        if drawer.is_finished() {
+            break;
+        }
+        if RESIZED.swap(false, Ordering::Relaxed) {
+            let (cols, rows) = size();
+            if write_msg(&mut writer, &ClientMsg::Resize { cols, rows }).is_err() {
+                break;
+            }
+        }
+        let mut pfd = libc::pollfd { fd: std::io::stdin().as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let n = unsafe { libc::poll(&mut pfd, 1, 250) };
+        if n <= 0 {
+            continue;
+        }
+        let got = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+        if got <= 0 {
+            break;
+        }
+        let bytes = &buf[..got as usize];
+        let mut i = 0;
+        let mut plain: Vec<u8> = Vec::new();
+        let flush = |w: &mut UnixStream, p: &mut Vec<u8>| {
+            if !p.is_empty() {
+                let _ = write_msg(w, &ClientMsg::Input(std::mem::take(p)));
+            }
+        };
+        while i < bytes.len() {
+            let Some((chord, used)) = chord_from_bytes(&bytes[i..]) else { break };
+            let name = format!("{}{}{}", if chord.ctrl { "C-" } else { "" }, if chord.alt { "M-" } else { "" }, chord.key);
+            let in_repeat = repeat_until.is_some_and(|t| Instant::now() < t) && keys.table.get(&chord).is_some_and(|b| b.repeat);
+            if waiting || in_repeat {
+                waiting = false;
+                flush(&mut writer, &mut plain);
+                repeat_until = keys.table.get(&chord).filter(|b| b.repeat).map(|_| Instant::now() + Duration::from_millis(600));
+                let _ = write_msg(&mut writer, &ClientMsg::Command(vec!["__key".into(), "prefix".into(), name]));
+            } else if chord == keys.prefix {
+                flush(&mut writer, &mut plain);
+                waiting = true;
+                repeat_until = None;
+            } else if keys.root.contains_key(&chord) {
+                flush(&mut writer, &mut plain);
+                let _ = write_msg(&mut writer, &ClientMsg::Command(vec!["__key".into(), "root".into(), name]));
+            } else {
+                repeat_until = None;
+                plain.extend_from_slice(&bytes[i..i + used]);
+            }
+            i += used;
+        }
+        if i < bytes.len() {
+            plain.extend_from_slice(&bytes[i..]);
+        }
+        flush(&mut writer, &mut plain);
+    }
+    let reason = drawer.join().unwrap_or_else(|_| "the client failed".into());
+    drop(raw);
+    Ok(reason)
+}

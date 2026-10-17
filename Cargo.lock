@@ -870,6 +870,7 @@ dependencies = [
  "alacritty_terminal",
  "libc",
  "mlua",
+ "postcard",
  "serde",
  "zeit-proto",
 ]

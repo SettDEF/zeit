@@ -13,7 +13,12 @@ pub fn runtime_dir() -> PathBuf {
         // no runtime dir (rare): a private folder in /tmp
         PathBuf::from(format!("/tmp/zeit-{}", unsafe { libc::getuid() }))
     });
-    base.join("zeit")
+    let dir = base.join("zeit");
+    // socket paths must stay under 108 bytes: a long runtime dir gets a short private one
+    if dir.as_os_str().len() > 70 {
+        return PathBuf::from(format!("/tmp/zeit-{}", unsafe { libc::getuid() }));
+    }
+    dir
 }
 
 /// The server's socket; `name` is tmux's `-L` (several servers side by side).
