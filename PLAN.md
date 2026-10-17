@@ -23,6 +23,10 @@ modules too, so a feature of zeit and a plugin look the same.
 -- ~/.config/zeit/init.lua
 local z = require('zeit')
 
+-- optional: a preset as the starting point ('friendly' = the zellij-like set);
+-- without one zeit is plain tmux. Presets are bundles, changed below line by line.
+-- z.preset('friendly')
+
 -- the features, as a list (like Doom's init.el): a word turns one on, +flags
 -- switch its parts, a -- in front turns it off again
 z.modules {
