@@ -472,9 +472,10 @@ impl Server {
         if cy == outer.y && self.ext.zfloat_opts(&p.name).buttons.unwrap_or(true) {
             let bx = (outer.x + outer.w).saturating_sub(9);
             let what = match cx.checked_sub(bx) {
-                Some(1) => Some("menu"),
-                Some(3) => Some("hide"),
-                Some(5) => Some("close"),
+                // two cells each: the terminal may draw them up to a cell further right (flush with its edge)
+                Some(1 | 2) => Some("menu"),
+                Some(3 | 4) => Some("hide"),
+                Some(5 | 6) => Some("close"),
                 _ => None,
             };
             if let Some(w) = what {

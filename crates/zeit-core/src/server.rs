@@ -449,7 +449,16 @@ impl Server {
                 self.send(cid, &ServerMsg::Bye { reason: "detached".into() });
                 self.clients.remove(&cid);
             }
-            ClientMsg::Input(bytes) => self.input(cid, &bytes),
+            ClientMsg::Input(bytes) => {
+                // the window being used sets the size (tmux's window-size latest): another, smaller
+                // window attached elsewhere must not keep this one small
+                if let Some(c) = self.clients.get(&cid).filter(|c| c.cols > 0 && (c.cols, c.rows) != self.size) {
+                    self.size = (c.cols, c.rows);
+                    self.layout_all();
+                    self.dirty = true;
+                }
+                self.input(cid, &bytes)
+            }
             ClientMsg::Resize { cols, rows } => {
                 if let Some(c) = self.clients.get_mut(&cid) {
                     c.cols = cols;

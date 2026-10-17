@@ -226,9 +226,11 @@ pub fn view(path: &str) {
     let input = Input::start();
     print!("\x1b[?25l\x1b[?7l");
     let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    // which turns are open (by their start), which header is chosen, how far up it is scrolled
+    // which turns are open (by their start), which header is chosen
     let mut open: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
-    let (mut sel, mut scroll, mut tick) = (usize::MAX, 0usize, 0usize);
+    // top: the first line shown, None follows the newest at the bottom; anchor: a turn to bring to the top
+    let (mut sel, mut tick) = (usize::MAX, 0usize);
+    let (mut top, mut anchor, mut shown_from): (Option<usize>, Option<u64>, usize) = (None, None, 0);
     let (mut last_len, mut last_size, mut dirty) = (u64::MAX, (0, 0), true);
     // which screen row shows which turn's header (for clicks)
     let mut header_rows: Vec<(usize, usize)> = Vec::new();
@@ -249,14 +251,15 @@ pub fn view(path: &str) {
                 if let [b, _x, y] = parts[..] {
                     let press = rest[end] == b'M';
                     match b {
-                        64 => scroll += 3,
-                        65 => scroll = scroll.saturating_sub(3),
+                        64 => top = Some(shown_from.saturating_sub(3)),
+                        65 => top = top.map(|_| shown_from + 3),
                         0 if press => {
                             if let Some(&(_, t)) = header_rows.iter().find(|(row, _)| *row + 1 == y as usize) {
                                 sel = t;
                                 let k = turns[t].start;
                                 let now = *open.get(&k).unwrap_or(&(t + 1 == n));
                                 open.insert(k, !now);
+                                anchor = Some(k);
                             }
                         }
                         _ => {}
@@ -267,16 +270,17 @@ pub fn view(path: &str) {
                 continue;
             }
             match rest[0] {
-                b'j' => sel = (sel + 1).min(n.saturating_sub(1)),
-                b'k' => sel = sel.saturating_sub(1),
+                b'j' if n > 0 => { sel = (sel + 1).min(n - 1); anchor = Some(turns[sel].start); }
+                b'k' if n > 0 => { sel = sel.saturating_sub(1); anchor = Some(turns[sel].start); }
                 b'\r' | b' ' if n > 0 => {
                     let k = turns[sel].start;
                     let now = *open.get(&k).unwrap_or(&(sel + 1 == n));
                     open.insert(k, !now);
+                    anchor = Some(k);
                 }
                 b'a' => turns.iter().for_each(|t| { open.insert(t.start, true); }),
                 b'c' => turns.iter().for_each(|t| { open.insert(t.start, false); }),
-                b'G' => scroll = 0,
+                b'G' => { top = None; sel = n.saturating_sub(1); }
                 _ => {}
             }
             i += 1;
@@ -286,9 +290,10 @@ pub fn view(path: &str) {
         let running = turns.last().is_some_and(|t| t.steps.iter().any(|e| e.end.is_none()));
         let sz = size();
         if len != last_len {
-            // something new: back to the newest, which is open
-            scroll = 0;
-            sel = n.saturating_sub(1);
+            // something new: the newest is chosen, unless the reader went up to look at something
+            if top.is_none() {
+                sel = n.saturating_sub(1);
+            }
         }
         if dirty || len != last_len || sz != last_size || running {
             (last_len, last_size, dirty) = (len, sz, false);
@@ -355,15 +360,33 @@ pub fn view(path: &str) {
             if lines.is_empty() {
                 lines.push(" \x1b[90mwhat Claude runs shows here\x1b[0m".into());
             }
-            // the newest at the bottom, as a terminal does; the wheel scrolls up
-            let body = h.saturating_sub(1);
-            scroll = scroll.min(lines.len().saturating_sub(body));
-            let end = lines.len() - scroll;
-            let start = end.saturating_sub(body);
+            // the newest at the bottom, as a terminal does; a prompt just opened (or chosen)
+            // comes to the top and stays there while more arrives, until G
+            let body = h.saturating_sub(1).max(1);
+            let last = lines.len().saturating_sub(body);
+            if let Some(k) = anchor.take() {
+                if let Some(&(l, _)) = heads.iter().find(|(_, t)| turns[*t].start == k) {
+                    top = Some(l);
+                }
+            }
+            top = top.map(|t| t.min(last)).filter(|t| *t < last);
+            let start = top.unwrap_or(last);
+            let end = (start + body).min(lines.len());
+            shown_from = start;
+            let mut shown: Vec<String> = lines[start..end].to_vec();
             header_rows = heads.iter().filter(|(l, _)| *l >= start && *l < end).map(|(l, t)| (l - start, *t)).collect();
+            // the header of the turn on screen stays at the top when it scrolled off (which prompt this is)
+            if let Some(&(l, t)) = heads.iter().rev().find(|(l, _)| *l < start) {
+                if !header_rows.iter().any(|(_, ht)| *ht == t) && end > start && heads.iter().all(|(hl, _)| *hl <= l || *hl > start) {
+                    shown[0] = lines[l].clone();
+                    header_rows.retain(|(row, _)| *row != 0);
+                    header_rows.push((0, t));
+                }
+            }
             let mut out = String::from("\x1b[H\x1b[2J");
-            out.push_str(&lines[start..end].join("\r\n"));
-            let hint = if scroll > 0 { format!("↑ {scroll} · G back down") } else { "click a prompt · j k Enter · a c".to_string() };
+            out.push_str(&shown.join("\r\n"));
+            let hint = if top.is_some() { "↑ paused · G follows the newest".to_string() } else { "click a prompt · j k Enter · a c".to_string() };
+
             out.push_str(&format!("\x1b[{h};1H\x1b[2K\x1b[90m{}\x1b[0m", cut(&hint, w)));
             print!("{out}");
             let _ = std::io::stdout().flush();
