@@ -25,6 +25,8 @@ enum Ev {
     Notice(String),
     /// a second passed while a job runs (its line shows the time)
     Tick,
+    /// a popup glides one more step
+    Animate,
     /// the config's files changed on disk: it is loaded again
     ConfigChanged,
 }
@@ -129,6 +131,8 @@ pub struct Server {
     popup_shown: HashMap<String, String>,
     /// sessions whose panes have the keyboard while their popup stays in view (the layer below)
     popup_below: HashSet<String>,
+    /// popups being dragged, per client
+    popup_drags: HashMap<u64, popup::Drag>,
     jobs: Vec<Job>,
     ticking: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -170,7 +174,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -317,6 +321,7 @@ impl Server {
                 self.dirty = true;
             }
             Ev::Notice(text) => self.notice_all(text),
+            Ev::Animate => self.animate_popups(),
             Ev::ConfigChanged => match self.command(None, vec!["source-file".into()]) {
                 Ok(m) => self.notice_all(m),
                 Err(e) => self.notice_all(format!("config: {e}")),
@@ -563,6 +568,10 @@ impl Server {
         let (cx, cy) = (x.saturating_sub(1), y.saturating_sub(1));
         let placed = if w.zoom { vec![(w.focus.clone(), area)] } else { w.layout.place(area).0 };
         let window_focus = w.focus.clone();
+        // dragging a popup (its frame, or Alt anywhere; Ctrl or the corner resizes)
+        if self.popup_drag(cid, &sid, b, cx, cy, press) {
+            return;
+        }
         // a shown popup: clicks inside are its program's, a click outside hides it
         let popup = self.shown_popup(&sid).cloned();
         let (placed, in_popup) = match &popup {
@@ -1770,7 +1779,7 @@ impl Server {
             out
         };
         match cmd {
-            "popup" | "display-popup" | "popup-toggle" | "popup-hide" | "popup-close" | "popup-list" | "choose-popup" | "popup-next" | "popup-layer" | "popup-move" => self.popup_command(cid, ctx.clone().or(target.clone()), cmd, args),
+            "popup" | "display-popup" | "popup-toggle" | "popup-hide" | "popup-close" | "popup-list" | "choose-popup" | "popup-next" | "popup-layer" | "popup-move" | "popup-align" => self.popup_command(cid, ctx.clone().or(target.clone()), cmd, args),
             "if-shell" | "if" => {
                 let cond = positional.first().cloned().unwrap_or_default();
                 let yes = if flag("-F") {
