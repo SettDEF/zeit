@@ -1848,7 +1848,20 @@ impl Server {
                 if place == "here" {
                     return Ok(String::new());
                 }
-                let id = self.start_job(&origin, line, &place, size, cwd)?;
+                // -e K=V: what the shell exported since it started
+                let mut envs = Vec::new();
+                let mut it = args.iter().take_while(|a| *a != "--");
+                while let Some(a) = it.next() {
+                    if a == "-e" {
+                        if let Some((k, v)) = it.next().and_then(|kv| kv.split_once('=')) {
+                            if k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !k.is_empty() {
+                                envs.push(format!("{k}={}", shell_quote(v)));
+                            }
+                        }
+                    }
+                }
+                let env = if envs.is_empty() { String::new() } else { format!("export {}; ", envs.join(" ")) };
+                let id = self.start_job(&origin, line, &place, size, cwd, env)?;
                 Ok(format!("routed {id}"))
             }
             "job-run" => {
@@ -1861,7 +1874,7 @@ impl Server {
                 }
                 let cwd = val("-c").map(PathBuf::from).or_else(|| self.panes.get(&origin).map(|p| p.cwd())).unwrap_or_default();
                 let place = val("-p").unwrap_or_else(|| "bottom".into());
-                let id = self.start_job(&origin, line, &place, None, cwd)?;
+                let id = self.start_job(&origin, line, &place, None, cwd, String::new())?;
                 Ok(id)
             }
             "job-toggle" => {
@@ -2532,6 +2545,8 @@ struct Job {
     /// the z.job_column columns
     extra: Vec<(char, String)>,
     cwd: PathBuf,
+    /// `export K=V; ` for what the shell had exported (a rerun sets it again)
+    env: String,
 }
 
 fn duration(d: std::time::Duration, tenths: bool) -> String {
@@ -2577,7 +2592,7 @@ impl Server {
         }
     }
 
-    fn start_job(&mut self, origin: &str, cmd: String, place: &str, size: Option<u16>, cwd: PathBuf) -> Result<String, String> {
+    fn start_job(&mut self, origin: &str, cmd: String, place: &str, size: Option<u16>, cwd: PathBuf, env: String) -> Result<String, String> {
         // the origin's run pane again, when its last job is done
         let busy = |s: &Server, r: &str| s.jobs.iter().any(|j| j.run.as_deref() == Some(r) && j.end.is_none());
         let reuse = self.jobs.iter().rev().find(|j| j.origin == origin && j.run.as_ref().is_some_and(|r| self.panes.contains_key(r))).and_then(|j| j.run.clone()).filter(|r| !busy(self, r));
@@ -2605,12 +2620,12 @@ impl Server {
             }
         };
         let id = paths::new_id("j");
-        let line = if fresh { cmd.clone() } else { format!("cd {} && {cmd}", shell_quote(&cwd.display().to_string())) };
+        let line = if fresh { format!("{env}{cmd}") } else { format!("cd {} && {env}{cmd}", shell_quote(&cwd.display().to_string())) };
         if let Some(p) = self.panes.get(&run) {
             // typed ahead: the new shell reads it once its prompt is up
             p.input(format!("{line}\r").as_bytes());
         }
-        self.jobs.push(Job { id: id.clone(), origin: origin.to_string(), cmd, run: Some(run), line: None, start: std::time::Instant::now(), end: None, out: None, sent: true, open: false, kept: Vec::new(), place: place.to_string(), progress: None, counts: Vec::new(), extra: Vec::new(), cwd });
+        self.jobs.push(Job { id: id.clone(), origin: origin.to_string(), cmd, run: Some(run), line: None, start: std::time::Instant::now(), end: None, out: None, sent: true, open: false, kept: Vec::new(), place: place.to_string(), progress: None, counts: Vec::new(), extra: Vec::new(), cwd, env });
         // a long list of old jobs is not needed
         if self.jobs.len() > 200 {
             self.jobs.remove(0);
@@ -2747,7 +2762,7 @@ impl Server {
                 if j.end.is_none() {
                     return Err("still running".into());
                 }
-                self.panes[&r].input(format!("cd {} && {}\r", shell_quote(&j.cwd.display().to_string()), j.cmd).as_bytes());
+                self.panes[&r].input(format!("cd {} && {}{}\r", shell_quote(&j.cwd.display().to_string()), j.env, j.cmd).as_bytes());
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
                     j.start = std::time::Instant::now();
                     j.end = None;

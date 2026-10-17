@@ -19,9 +19,15 @@ if [[ -o interactive ]]; then
   # Enter: when a rule sends the command elsewhere, this shell keeps one line for it
   _zeit_accept() {
     emulate -L zsh
-    local cmd=$BUFFER r
+    local cmd=$BUFFER r k
     if [[ -e @RULES@ && -n ${cmd//[[:space:]]/} ]]; then
-      r=$(@ZEIT@ __route -- "$cmd" 2>/dev/null)
+      # exported variables that changed since the shell started go along
+      local -a envs
+      for k in ${(k)parameters[(R)*export*]}; do
+        case $k in PWD|OLDPWD|_|SHLVL|ZEIT*|TERM|COLUMNS|LINES|PS1|PS2|PROMPT|RPROMPT) continue ;; esac
+        [[ "${(P)k}" == "${_zeit_env0[$k]-__zeit_unset__}" ]] || envs+=(-e "$k=${(P)k}")
+      done
+      r=$(@ZEIT@ __route "${envs[@]}" -- "$cmd" 2>/dev/null)
       if [[ $r == routed\ * ]]; then
         print -s -- "$cmd"
         typeset -g _zeit_job=${r#routed } _zeit_job_cmd=$cmd
@@ -42,6 +48,10 @@ if [[ -o interactive ]]; then
   # after .zshrc (plugins included), once: the hooks go first, Enter is wrapped
   _zeit_setup() {
     add-zsh-hook -d precmd _zeit_setup
+    # the environment the shell started with (what changes later goes along to routed commands)
+    typeset -gA _zeit_env0
+    local k
+    for k in ${(k)parameters[(R)*export*]}; do _zeit_env0[$k]=${(P)k}; done
     if (( ! ${+functions[_zash_precmd]} )); then
       precmd_functions=(_zeit_precmd ${precmd_functions:#_zeit_precmd})
       add-zsh-hook preexec _zeit_preexec
