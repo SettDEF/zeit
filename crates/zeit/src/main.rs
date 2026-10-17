@@ -64,19 +64,9 @@ fn connect() -> UnixStream {
         return hello(s);
     }
     let exe = std::env::current_exe().unwrap_or_else(|e| fail(&e.to_string()));
-    {
-        use std::os::unix::process::CommandExt;
-        let mut c = std::process::Command::new(&exe);
-        c.arg("server").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        unsafe {
-            c.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        c.spawn().unwrap_or_else(|e| fail(&format!("could not start the server: {e}")));
-    }
-    for _ in 0..400 {
+    zeit_core::server::spawn_server(&exe);
+    // up to 10 s: a server with many panes to bring back takes a while
+    for _ in 0..2000 {
         if let Ok(s) = UnixStream::connect(&sock) {
             return hello(s);
         }

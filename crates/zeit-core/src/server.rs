@@ -2031,6 +2031,9 @@ impl Server {
                     self.send(c, &ServerMsg::Reply { ok: true, text: "restarting".into() });
                 }
                 let _ = std::fs::remove_file(paths::server_socket("default"));
+                // the next server starts now, so it is there when the clients come back (they used to
+                // start it, and gave up when it took long: their windows closed)
+                spawn_server(&self.exe);
                 std::process::exit(0);
             }
             "command-prompt" => {
@@ -3552,4 +3555,21 @@ fn web_address(s: &str) -> String {
     } else {
         format!("https://duckduckgo.com/?q={}", s.replace(' ', "+"))
     }
+}
+
+/// Starts a server on its own (its own session, no terminal); what it says goes to server.log.
+pub fn spawn_server(exe: &std::path::Path) {
+    use std::os::unix::process::CommandExt;
+    let log = paths::state_dir().join("server.log");
+    let _ = std::fs::create_dir_all(paths::state_dir());
+    let err = std::fs::OpenOptions::new().create(true).append(true).open(&log).map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null());
+    let mut c = std::process::Command::new(exe);
+    c.arg("server").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(err);
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let _ = c.spawn();
 }

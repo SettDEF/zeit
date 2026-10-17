@@ -198,10 +198,10 @@ pub fn view(path: &str) {
             }
             let done = entries.iter().filter(|e| e.end.is_some()).count();
             let head = match (running, idle) {
-                (true, _) => format!(" \x1b[1mClaude is working\x1b[0m \x1b[90m· {done} done\x1b[0m"),
-                (false, Some(_)) => format!(" \x1b[1mClaude is done\x1b[0m \x1b[90m· {} steps\x1b[0m", entries.len()),
+                (true, _) => format!(" \x1b[33m●\x1b[0m \x1b[1mworking\x1b[0m \x1b[90m· {done} done\x1b[0m"),
+                (false, Some(_)) => format!(" \x1b[32m●\x1b[0m \x1b[1mdone\x1b[0m \x1b[90m· {} steps\x1b[0m", entries.len()),
                 _ if entries.is_empty() => " \x1b[90mwhat Claude runs shows here\x1b[0m".to_string(),
-                _ => format!(" \x1b[1mClaude\x1b[0m \x1b[90m· {} steps\x1b[0m", entries.len()),
+                _ => format!(" \x1b[90m●\x1b[0m \x1b[1mwaiting\x1b[0m \x1b[90m· {} steps\x1b[0m", entries.len()),
             };
             // the newest at the bottom, as a terminal does
             let body = h.saturating_sub(2);
