@@ -196,6 +196,8 @@ impl Keys {
             "bind f zfloat-toggle",
             "bind F zfloat-list",
             "bind Tab zfloat-layer",
+            "bind -n M-f toggle-floats",
+            "bind E float-embed",
             "bind A timeline -a",
             "bind M-1 select-layout even-horizontal",
             "bind M-2 select-layout even-vertical",

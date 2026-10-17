@@ -28,6 +28,11 @@ Your shells keep running, and remember: a terminal multiplexer with tmux's keys.
   `select-layout` <name>     even-horizontal, even-vertical, main-*, tiled
   `web` [`-h`|`-v`] <address>    a pane that is a web page (drawn by zash)
 
+**Floats** (panes floating over their window, as in zellij):
+  `float` [`-w` cols] [`-h` rows] [`-c` dir] [<command>]   a new one   `toggle-floats`   show / hide the window's floats   `M-f`
+  `float-embed`   a float into the layout, or the focused pane out of it   prefix `E`      `float-next`   `float-close`
+  mouse: a click brings a float up, drag its frame (or Alt+drag), Ctrl+drag or the corner resizes
+
 **zfloats** (panes on their own layer over the layout; they keep running while hidden):
   `zfloat` [`-n` <name>] [`-w` %] [`-h` %] [`-a` <side>] [`-B`] [<command>]   a new one (output stays when it ends)
   `zfloat-toggle` / `zfloat-show` [`-n` <name>] [<command>]   show or hide / only show (made the first time)   prefix `f`

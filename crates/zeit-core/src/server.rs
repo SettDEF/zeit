@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::net::{UnixListener, UnixStream};
 
+mod floats;
 mod popup;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
@@ -135,6 +136,10 @@ pub struct Server {
     popup_below: HashSet<String>,
     /// popups being dragged, per client
     popup_drags: HashMap<u64, popup::Drag>,
+    /// floating panes (zellij's), the one with the keyboard per session, and drags
+    floats: Vec<floats::Float>,
+    float_focus: HashMap<String, String>,
+    float_drags: HashMap<u64, floats::FloatDrag>,
     jobs: Vec<Job>,
     ticking: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -176,7 +181,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), floats: Vec::new(), float_focus: HashMap::new(), float_drags: HashMap::new() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -219,6 +224,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     s.rules_flag();
     s.restore();
     s.restore_popups();
+    s.restore_floats();
     loop {
         let Ok(ev) = rx.recv() else { break };
         s.handle(ev);
@@ -601,6 +607,16 @@ impl Server {
             }
             None => (placed, false),
         };
+        // floats come next: a press there is theirs (raise, focus, drag), else beside them
+        let (placed, in_popup) = if in_popup {
+            (placed, in_popup)
+        } else {
+            match self.float_mouse(cid, &sid, b, cx, cy, press) {
+                Some((p, _)) if p.is_empty() => return,
+                Some((p, r)) => (vec![(p, r)], true),
+                None => (placed, false),
+            }
+        };
         let Some((pane, r)) = placed.into_iter().find(|(_, r)| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h) else { return };
         let focus = if in_popup { pane.clone() } else { window_focus };
         let wheel = b & 64 != 0;
@@ -678,6 +694,10 @@ impl Server {
         if let Some(p) = self.shown_popup(&s.id).filter(|_| !self.popup_below.contains(&s.id)) {
             return Some(p.pane.clone());
         }
+        // then a float that has it
+        if let Some(f) = self.focused_float(&s.id) {
+            return Some(f);
+        }
         Some(s.windows.get(s.active)?.focus.clone())
     }
 
@@ -736,6 +756,11 @@ impl Server {
 
     fn pane_gone(&mut self, pane: &str, code: i32) {
         self.panes.remove(pane);
+        if self.float_pane_gone(pane) {
+            let _ = std::fs::remove_file(paths::pane_socket(pane));
+            self.ext.emit("pane_exit", &[("pane", pane.to_string()), ("status", code.to_string())]);
+            return;
+        }
         if self.popup_gone(pane) {
             let _ = std::fs::remove_file(paths::pane_socket(pane));
             self.ext.emit("pane_exit", &[("pane", pane.to_string()), ("status", code.to_string())]);
@@ -762,6 +787,9 @@ impl Server {
     /// the session when it was its last window). The pane itself lives on.
     fn unlink_pane(&mut self, pane: &str) {
         let Some((sid, wi)) = self.where_is(pane) else { return };
+        // its window's floats stay with the window (or go with it)
+        let ids = self.session(&sid).map(|s| s.windows[wi].layout.ids()).unwrap_or_default();
+        self.reanchor_floats(pane, &ids);
         let Some(s) = self.session_mut(&sid) else { return };
         let w = &mut s.windows[wi];
         let layout = std::mem::replace(&mut w.layout, Layout::Leaf(String::new()));
@@ -833,6 +861,7 @@ impl Server {
             }
         }
         self.layout_popups();
+        self.layout_floats();
     }
 
     // ── drawing ──
@@ -908,6 +937,11 @@ impl Server {
             }
         }
         // a popup floats over the panes and has the cursor
+        // floats over the tiled panes (under any zfloat); the focused one has the cursor
+        if let Some((cur, sh)) = self.draw_floats(&sid, &mut grid) {
+            cursor = cur;
+            shape = sh;
+        }
         if let Some((cur, sh)) = self.draw_popup(&sid, &mut grid) {
             // the popup has the keyboard: its cursor; else the pane below keeps its own (if not covered)
             if !self.popup_below.contains(&sid) {
@@ -1804,6 +1838,7 @@ impl Server {
                 };
                 self.popup_command(cid, ctx.clone().or(target.clone()), &name, args)
             }
+            "float" | "new-float" | "toggle-floats" | "float-toggle" | "float-embed" | "float-next" | "float-close" => self.float_command(cid, ctx.clone().or(target.clone()), cmd, args),
             "if-shell" | "if" => {
                 let cond = positional.first().cloned().unwrap_or_default();
                 let yes = if flag("-F") {
