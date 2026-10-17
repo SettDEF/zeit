@@ -74,7 +74,15 @@ pub struct Frame {
     pub cursor: Option<(u16, u16)>,
     pub cursor_shape: CursorShape,
     pub title: String,
+    /// what the focused program asked of the terminal (MODE_* bits)
+    pub modes: u8,
 }
+
+pub const MODE_MOUSE: u8 = 1;
+pub const MODE_SGR_MOUSE: u8 = 2;
+pub const MODE_PASTE: u8 = 4;
+pub const MODE_APP_CURSOR: u8 = 8;
+pub const MODE_FOCUS: u8 = 16;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ServerMsg {

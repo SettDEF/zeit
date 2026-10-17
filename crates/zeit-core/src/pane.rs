@@ -158,6 +158,35 @@ impl Pane {
         (out, cursor, shape)
     }
 
+    /// What the program asked of the terminal (zeit_proto::MODE_* bits).
+    pub fn modes(&self) -> u8 {
+        use alacritty_terminal::term::TermMode;
+        let m = *self.term.lock().mode();
+        let mut out = 0;
+        if m.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) { out |= zeit_proto::MODE_MOUSE; }
+        if m.contains(TermMode::SGR_MOUSE) { out |= zeit_proto::MODE_SGR_MOUSE; }
+        if m.contains(TermMode::BRACKETED_PASTE) { out |= zeit_proto::MODE_PASTE; }
+        if m.contains(TermMode::APP_CURSOR) { out |= zeit_proto::MODE_APP_CURSOR; }
+        if m.contains(TermMode::FOCUS_IN_OUT) { out |= zeit_proto::MODE_FOCUS; }
+        out
+    }
+
+    pub fn alt_screen(&self) -> bool {
+        self.term.lock().mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+    }
+
+    /// Scrolls the view back (+) or forward (-); 0 returns to the live screen.
+    pub fn scroll(&self, lines: i32) {
+        use alacritty_terminal::grid::Scroll;
+        let mut t = self.term.lock();
+        t.scroll_display(if lines == 0 { Scroll::Bottom } else { Scroll::Delta(lines) });
+    }
+
+    /// How far the view is scrolled back (0: live).
+    pub fn scrolled(&self) -> usize {
+        self.term.lock().grid().display_offset()
+    }
+
     /// The screen as plain text (capture-pane).
     pub fn text(&self) -> String {
         let (rows, _, _) = self.screen();

@@ -35,7 +35,8 @@ impl Raw {
         unsafe { libc::cfmakeraw(&mut t) };
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) };
         // alternate screen, bracketed paste and focus events passed through
-        print!("\x1b[?1049h\x1b[?2004h\x1b[H\x1b[2J");
+        // alternate screen; the mouse always (click a pane, the wheel scrolls back)
+        print!("\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[H\x1b[2J");
         let _ = std::io::stdout().flush();
         Some(Raw(old))
     }
@@ -43,7 +44,7 @@ impl Raw {
 
 impl Drop for Raw {
     fn drop(&mut self) {
-        print!("\x1b[0m\x1b[?2004l\x1b[?25h\x1b[0 q\x1b[?1049l");
+        print!("\x1b[0m\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[?25h\x1b[0 q\x1b[?1049l");
         let _ = std::io::stdout().flush();
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.0) };
     }
@@ -97,10 +98,15 @@ pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<Strin
         sa.sa_sigaction = on_winch as *const () as usize;
         libc::sigaction(libc::SIGWINCH, &sa, std::ptr::null_mut());
     }
+    // the drawing thread pokes this pipe when the session is over, so the key loop wakes
+    let mut pipe = [0i32; 2];
+    unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) };
+    let (wake_r, wake_w) = (pipe[0], pipe[1]);
     // the server's frames, drawn as they come
     let mut reader = sock.try_clone().map_err(|e| e.to_string())?;
     let drawer = std::thread::spawn(move || -> String {
         let mut stdout = std::io::stdout().lock();
+        let mut modes: Option<u8> = None;
         loop {
             match read_msg::<_, ServerMsg>(&mut reader) {
                 Ok(ServerMsg::Frame(f)) => {
@@ -122,6 +128,14 @@ pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<Strin
                         }
                     }
                     out.push_str("\x1b[0m");
+                    // the outer terminal behaves as the focused program asked: paste, arrows, focus
+                    if modes != Some(f.modes) {
+                        let on = |bit: u8| f.modes & bit != 0;
+                        out.push_str(if on(zeit_proto::MODE_PASTE) { "\x1b[?2004h" } else { "\x1b[?2004l" });
+                        out.push_str(if on(zeit_proto::MODE_APP_CURSOR) { "\x1b[?1h" } else { "\x1b[?1l" });
+                        out.push_str(if on(zeit_proto::MODE_FOCUS) { "\x1b[?1004h" } else { "\x1b[?1004l" });
+                        modes = Some(f.modes);
+                    }
                     out.push_str(&format!("\x1b]2;{}\x07", f.title.replace(['\x07', '\x1b'], "")));
                     match (f.cursor, f.cursor_shape) {
                         (Some((x, y)), shape) if shape != CursorShape::Hidden => {
@@ -141,9 +155,15 @@ pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<Strin
                     let _ = stdout.write_all(&seq);
                     let _ = stdout.flush();
                 }
-                Ok(ServerMsg::Bye { reason }) => return reason,
+                Ok(ServerMsg::Bye { reason }) => {
+                    unsafe { libc::write(wake_w, [1u8].as_ptr().cast(), 1) };
+                    return reason;
+                }
                 Ok(_) => {}
-                Err(_) => return "the server went away".into(),
+                Err(_) => {
+                    unsafe { libc::write(wake_w, [1u8].as_ptr().cast(), 1) };
+                    return "the server went away".into();
+                }
             }
         }
     });
@@ -162,9 +182,13 @@ pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<Strin
                 break;
             }
         }
-        let mut pfd = libc::pollfd { fd: std::io::stdin().as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        let n = unsafe { libc::poll(&mut pfd, 1, 250) };
-        if n <= 0 {
+        let mut pfd = [
+            libc::pollfd { fd: std::io::stdin().as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: wake_r, events: libc::POLLIN, revents: 0 },
+        ];
+        // no timeout: idle means idle (a resize interrupts the wait, the pipe ends it)
+        let n = unsafe { libc::poll(pfd.as_mut_ptr(), 2, -1) };
+        if n <= 0 || pfd[1].revents != 0 {
             continue;
         }
         let got = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };

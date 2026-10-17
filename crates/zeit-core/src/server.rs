@@ -66,6 +66,8 @@ pub struct Server {
     dirty: bool,
     /// passthrough sequences for a client, sent after its next frame (so the cursor is right)
     pending: HashMap<u64, Vec<Vec<u8>>>,
+    /// the start of a mouse report whose end has not arrived yet
+    carry: HashMap<u64, Vec<u8>>,
 }
 
 type Reply = Result<String, String>;
@@ -106,7 +108,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
         keys.prefix = p;
     }
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new() };
     s.restore();
     loop {
         let Ok(ev) = rx.recv() else { break };
@@ -274,13 +276,7 @@ impl Server {
                 self.send(cid, &ServerMsg::Bye { reason: "detached".into() });
                 self.clients.remove(&cid);
             }
-            ClientMsg::Input(bytes) => {
-                if let Some(p) = self.client_pane(cid) {
-                    if let Some(p) = self.panes.get(&p) {
-                        p.input(&bytes);
-                    }
-                }
-            }
+            ClientMsg::Input(bytes) => self.input(cid, &bytes),
             ClientMsg::Resize { cols, rows } => {
                 if let Some(c) = self.clients.get_mut(&cid) {
                     c.cols = cols;
@@ -327,6 +323,105 @@ impl Server {
             c.notice = Some(text.clone());
         }
         self.dirty = true;
+    }
+
+    // ── input: keys to the focused pane, the mouse to the pane under it ──
+
+    fn input(&mut self, cid: u64, bytes: &[u8]) {
+        // a mouse report split across reads waits for its end
+        let mut joined = self.carry.remove(&cid).unwrap_or_default();
+        joined.extend_from_slice(bytes);
+        let bytes = &joined[..];
+        let mut plain: Vec<u8> = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if let Some((b, x, y, press, n)) = sgr_mouse(&bytes[i..]) {
+                self.flush_keys(cid, &mut plain);
+                self.mouse(cid, b, x, y, press);
+                i += n;
+                continue;
+            }
+            let rest = &bytes[i..];
+            if rest.starts_with(b"\x1b[<") && rest.len() < 24 && !rest.iter().any(|c| *c == b'M' || *c == b'm') && rest[3..].iter().all(|c| c.is_ascii_digit() || *c == b';') {
+                self.carry.insert(cid, rest.to_vec());
+                break;
+            }
+            plain.push(bytes[i]);
+            i += 1;
+        }
+        self.flush_keys(cid, &mut plain);
+    }
+
+    fn flush_keys(&mut self, cid: u64, plain: &mut Vec<u8>) {
+        if plain.is_empty() {
+            return;
+        }
+        let Some(p) = self.client_pane(cid).and_then(|p| self.panes.get(&p)) else { return plain.clear() };
+        // typing goes back to the live screen
+        if p.scrolled() > 0 {
+            p.scroll(0);
+            self.dirty = true;
+        }
+        let mut out = std::mem::take(plain);
+        // paste markers only for programs that asked for them
+        if p.modes() & zeit_proto::MODE_PASTE == 0 {
+            for m in [&b"\x1b[200~"[..], &b"\x1b[201~"[..]] {
+                while let Some(at) = out.windows(m.len()).position(|w| w == m) {
+                    out.drain(at..at + m.len());
+                }
+            }
+        }
+        p.input(&out);
+    }
+
+    /// A mouse report from the client (SGR, 1-based cells of the whole screen).
+    fn mouse(&mut self, cid: u64, b: u32, x: u16, y: u16, press: bool) {
+        let Some(sid) = self.client_session(cid) else { return };
+        let area = self.area();
+        let Some(s) = self.session(&sid) else { return };
+        let Some(w) = s.windows.get(s.active) else { return };
+        let (cx, cy) = (x.saturating_sub(1), y.saturating_sub(1));
+        let placed = if w.zoom { vec![(w.focus.clone(), area)] } else { w.layout.place(area).0 };
+        let Some((pane, r)) = placed.into_iter().find(|(_, r)| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h) else { return };
+        let wheel = b & 64 != 0;
+        let motion = b & 32 != 0;
+        // a click in another pane gives it the keyboard
+        if press && !wheel && !motion && pane != w.focus {
+            if let Some(s) = self.session_mut(&sid) {
+                let w = &mut s.windows[s.active];
+                w.focus = pane.clone();
+            }
+            self.dirty = true;
+        }
+        let Some(p) = self.panes.get(&pane) else { return };
+        let modes = p.modes();
+        let (px, py) = (cx - r.x + 1, cy - r.y + 1);
+        if modes & zeit_proto::MODE_MOUSE != 0 {
+            // the program wants the mouse: the report, in its own cells
+            let report = if modes & zeit_proto::MODE_SGR_MOUSE != 0 {
+                format!("\x1b[<{b};{px};{py}{}", if press { 'M' } else { 'm' }).into_bytes()
+            } else {
+                let code = if press { b } else { 3 } + 32;
+                vec![0x1b, b'[', b'M', code.min(255) as u8, (px + 32).min(255) as u8, (py + 32).min(255) as u8]
+            };
+            p.input(&report);
+        } else if wheel {
+            let up = b & 1 == 0;
+            if p.alt_screen() {
+                // full-screen programs without the mouse (less, man) get arrow keys
+                let key: &[u8] = match (up, modes & zeit_proto::MODE_APP_CURSOR != 0) {
+                    (true, true) => b"\x1bOA",
+                    (true, false) => b"\x1b[A",
+                    (false, true) => b"\x1bOB",
+                    (false, false) => b"\x1b[B",
+                };
+                p.input(&key.repeat(3));
+            } else {
+                // the shell: scroll back through the pane
+                p.scroll(if up { 3 } else { -3 });
+                self.dirty = true;
+            }
+        }
     }
 
     // ── finding things ──
@@ -531,7 +626,8 @@ impl Server {
             wins.push_str(&format!(" {i}:{title}{} ", if i == s.active { "*" } else if i == s.last { "-" } else { "" }));
         }
         left.push_str(&wins);
-        let right = notice.unwrap_or_else(|| format!(" {} ", hostname()));
+        let scrolled = self.panes.get(&w.focus).map(|p| p.scrolled()).unwrap_or(0);
+        let right = if scrolled > 0 { format!(" ↑ {scrolled} lines · type to return ") } else { notice.unwrap_or_else(|| format!(" {} ", hostname())) };
         write_text(&mut grid, status_row, 0, &" ".repeat(cols as usize), Color::Indexed(0), Color::Indexed(2), 0);
         write_text(&mut grid, status_row, 0, &format!(" {} ", s.name), Color::Indexed(0), Color::Indexed(2), zeit_proto::BOLD);
         let mut x = s.name.chars().count() + 3;
@@ -550,12 +646,13 @@ impl Server {
             write_text(&mut grid, hr, 1, &hint, Color::Indexed(7), Color::Indexed(0), 0);
         }
         let title = self.panes.get(&w.focus).map(|p| p.title.lock().unwrap().clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| format!("zeit: {}", s.name));
+        let modes = self.panes.get(&w.focus).map(|p| p.modes()).unwrap_or(0);
         // only the rows that changed go out
         let c = self.clients.get_mut(&cid).unwrap();
         let full = c.last.len() != grid.len() || c.last.first().map(|r| r.len()) != grid.first().map(|r| r.len());
         let changed: Vec<(u16, Vec<Cell>)> = grid.iter().enumerate().filter(|(i, row)| full || c.last.get(*i) != Some(row)).map(|(i, row)| (i as u16, row.clone())).collect();
         c.last = grid;
-        let frame = Frame { cols, rows, changed, cursor, cursor_shape: shape, title };
+        let frame = Frame { cols, rows, changed, cursor, cursor_shape: shape, title, modes };
         self.send(cid, &ServerMsg::Frame(frame));
         for seq in self.pending.remove(&cid).unwrap_or_default() {
             self.send(cid, &ServerMsg::Passthrough(seq));
@@ -983,4 +1080,27 @@ fn foreground_name(shell: u32) -> Option<String> {
 
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// An SGR mouse report at the start of `b`: (button, x, y, pressed, bytes used).
+fn sgr_mouse(b: &[u8]) -> Option<(u32, u16, u16, bool, usize)> {
+    let rest = b.strip_prefix(b"\x1b[<")?;
+    let end = rest.iter().position(|c| *c == b'M' || *c == b'm')?;
+    let body = std::str::from_utf8(&rest[..end]).ok()?;
+    let mut it = body.split(';');
+    let btn = it.next()?.parse().ok()?;
+    let x = it.next()?.parse().ok()?;
+    let y = it.next()?.parse().ok()?;
+    Some((btn, x, y, rest[end] == b'M', 3 + end + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn mouse_reports() {
+        assert_eq!(super::sgr_mouse(b"\x1b[<0;12;5Mrest"), Some((0, 12, 5, true, 10)));
+        assert_eq!(super::sgr_mouse(b"\x1b[<64;3;4M"), Some((64, 3, 4, true, 10)));
+        assert_eq!(super::sgr_mouse(b"\x1b[<0;1;1m"), Some((0, 1, 1, false, 9)));
+        assert_eq!(super::sgr_mouse(b"\x1b[A"), None);
+    }
 }
