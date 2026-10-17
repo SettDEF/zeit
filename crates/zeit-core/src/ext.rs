@@ -18,7 +18,8 @@ pub struct Module {
 }
 
 enum Action {
-    Cmd(Vec<String>),
+    /// a command line, run as tmux would (`a ; b` runs both)
+    Cmd(String),
     Lua(RegistryKey),
 }
 
@@ -27,6 +28,7 @@ struct Map {
     table: String,
     key: Chord,
     action: Action,
+    repeat: bool,
 }
 
 #[derive(Default)]
@@ -36,8 +38,12 @@ struct State {
     maps: Vec<Map>,
     hooks: HashMap<String, Vec<RegistryKey>>,
     /// zeit commands asked for by Lua, run by the server after the call
-    queued: Vec<Vec<String>>,
+    queued: Vec<String>,
     notices: Vec<String>,
+    /// z.set: options, by tmux's names (status-position, @primary, history-limit …)
+    opts: BTreeMap<String, String>,
+    /// z.tmux(false): leave tmux.conf alone, this config is the whole story
+    no_tmux: bool,
 }
 
 pub struct Ext {
@@ -47,19 +53,20 @@ pub struct Ext {
     pub plugins: Vec<String>,
 }
 
-/// Splits a command line into words (double quotes keep spaces).
+/// Splits a command line into words (quotes, single or double, keep spaces).
 pub fn words(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
-    let mut quoted = false;
+    let mut quote: Option<char> = None;
     let mut any = false;
     for c in line.chars() {
         match c {
-            '"' => {
-                quoted = !quoted;
+            '"' | '\'' if quote.is_none() => {
+                quote = Some(c);
                 any = true;
             }
-            c if c.is_whitespace() && !quoted => {
+            c if quote == Some(c) => quote = None,
+            c if c.is_whitespace() && quote.is_none() => {
                 if any {
                     out.push(std::mem::take(&mut cur));
                     any = false;
@@ -153,7 +160,7 @@ impl Ext {
     /// A key bound in Lua (`table` is "prefix" or "root"): runs it; false when none.
     pub fn key(&mut self, table: &str, key: &Chord) -> bool {
         enum Do {
-            Cmd(Vec<String>),
+            Cmd(String),
             Fun(Function),
         }
         let what = {
@@ -207,7 +214,20 @@ impl Ext {
         Ok(text_of(&v).unwrap_or_else(|| "nil".into()))
     }
 
-    pub fn take_commands(&self) -> Vec<Vec<String>> {
+    /// Every key bound in Lua: (table, key, command line or "" for a function, repeat).
+    pub fn bindings(&self) -> Vec<(String, Chord, String, bool)> {
+        self.st.borrow().maps.iter().map(|m| (m.table.clone(), m.key.clone(), match &m.action { Action::Cmd(c) => c.clone(), Action::Lua(_) => String::new() }, m.repeat)).collect()
+    }
+
+    pub fn opts(&self) -> BTreeMap<String, String> {
+        self.st.borrow().opts.clone()
+    }
+
+    pub fn reads_tmux(&self) -> bool {
+        !self.st.borrow().no_tmux
+    }
+
+    pub fn take_commands(&self) -> Vec<String> {
         std::mem::take(&mut self.st.borrow_mut().queued)
     }
 
@@ -243,20 +263,25 @@ impl Ext {
             Ok(())
         })?)?;
 
-        // z.map('<prefix>g', 'new-window lazygit' | function, { desc = '' })
+        // z.map('<prefix>g', 'new-window lazygit' | function, { repeats = true })
+        // keys: '<prefix>x' after the prefix, '<copy>y' in copy mode, plain 'M-j' always
         let st = self.st.clone();
-        z.set("map", lua.create_function(move |lua, (keys, action): (String, Value)| {
-            let (table, k) = match keys.strip_prefix("<prefix>") {
-                Some(rest) => ("prefix", rest.to_string()),
-                None => ("root", keys.clone()),
+        z.set("map", lua.create_function(move |lua, (keys, action, opts): (String, Value, Option<Table>)| {
+            let (table, k) = if let Some(rest) = keys.strip_prefix("<prefix>") {
+                ("prefix", rest.to_string())
+            } else if let Some(rest) = keys.strip_prefix("<copy>") {
+                ("copy", rest.to_string())
+            } else {
+                ("root", keys.clone())
             };
+            let repeat = opts.and_then(|o| o.get::<bool>("repeats").ok()).unwrap_or(false);
             let key = Chord::parse(&k).ok_or_else(|| mlua::Error::RuntimeError(format!("not a key: {k}")))?;
             let action = match action {
-                Value::String(s) => Action::Cmd(words(&s.to_string_lossy())),
+                Value::String(s) => Action::Cmd(s.to_string_lossy()),
                 Value::Function(f) => Action::Lua(lua.create_registry_value(f)?),
                 _ => return Err(mlua::Error::RuntimeError("z.map: a command line or a function".into())),
             };
-            st.borrow_mut().maps.push(Map { table: table.into(), key, action });
+            st.borrow_mut().maps.push(Map { table: table.into(), key, action, repeat });
             Ok(())
         })?)?;
 
@@ -269,7 +294,21 @@ impl Ext {
 
         let st = self.st.clone();
         z.set("cmd", lua.create_function(move |_, line: String| {
-            st.borrow_mut().queued.push(words(&line));
+            st.borrow_mut().queued.push(line);
+            Ok(())
+        })?)?;
+
+        // z.set('status-position', 'top'), z.set('@primary', '#ddc7a1')
+        let st = self.st.clone();
+        z.set("set", lua.create_function(move |_, (name, value): (String, Value)| {
+            st.borrow_mut().opts.insert(name, text_of(&value).unwrap_or_default());
+            Ok(())
+        })?)?;
+
+        // z.tmux(false): do not read tmux.conf
+        let st = self.st.clone();
+        z.set("tmux", lua.create_function(move |_, on: bool| {
+            st.borrow_mut().no_tmux = !on;
             Ok(())
         })?)?;
 
@@ -353,7 +392,7 @@ mod tests {
         assert_eq!(e.prefix(), Chord::parse("C-Space"));
         assert!(e.key("prefix", &Chord::parse("g").unwrap()));
         assert!(e.key("root", &Chord::parse("M-z").unwrap()));
-        assert_eq!(e.take_commands(), vec![words("new-window -n git lazygit"), words("resize-pane -Z")]);
+        assert_eq!(e.take_commands(), vec!["new-window -n git lazygit".to_string(), "resize-pane -Z".to_string()]);
         assert!(e.key("prefix", &Chord::parse("H").unwrap()));
         assert!(!e.key("prefix", &Chord::parse("q").unwrap()));
         e.emit("pane_exit", &[("pane", "p1".into()), ("status", "2".into())]);
@@ -365,5 +404,6 @@ mod tests {
     #[test]
     fn command_words() {
         assert_eq!(words(r#"new-window -n "my shell" zsh"#), vec!["new-window", "-n", "my shell", "zsh"]);
+        assert_eq!(words("new-window -n 'conf' 'vim a'"), vec!["new-window", "-n", "conf", "vim a"]);
     }
 }

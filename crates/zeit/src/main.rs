@@ -93,10 +93,19 @@ fn attach(session: Option<String>, place: Option<String>) {
     if std::env::var_os("ZEIT_PANE").is_some() {
         fail("already inside zeit (unset ZEIT_PANE to nest anyway)");
     }
-    let s = connect();
-    match client::attach(s, session, place) {
-        Ok(reason) => println!("[{reason}]"),
-        Err(e) => fail(&e),
+    let (mut session, mut place) = (session, place);
+    loop {
+        let s = connect();
+        match client::attach(s, session.clone(), place.clone()) {
+            // the server restarted (an upgrade): back to the same session on the new one
+            Ok(reason) if reason.starts_with("__restart:") => {
+                session = Some(reason["__restart:".len()..].to_string());
+                place = None;
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            Ok(reason) => return println!("[{reason}]"),
+            Err(e) => fail(&e),
+        }
     }
 }
 

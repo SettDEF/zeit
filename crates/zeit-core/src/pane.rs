@@ -62,7 +62,7 @@ pub struct Pane {
 
 impl Pane {
     /// Connects to a running holder (a new pane, or one that outlived a server).
-    pub fn connect(id: &str, cols: u16, rows: u16, start_dir: PathBuf, events: Sender<PaneEvent>) -> std::io::Result<Pane> {
+    pub fn connect(id: &str, cols: u16, rows: u16, start_dir: PathBuf, history: usize, events: Sender<PaneEvent>) -> std::io::Result<Pane> {
         let mut stream = UnixStream::connect(crate::paths::pane_socket(id))?;
         let pid = match read_msg::<_, HolderMsg>(&mut stream)? {
             HolderMsg::Hello { pid, .. } => pid,
@@ -74,7 +74,7 @@ impl Pane {
         let title = Arc::new(Mutex::new(String::new()));
         let replies = Replies { writer: writer.clone(), title: title.clone() };
         let size = term::test::TermSize::new(cols as usize, rows as usize);
-        let config = term::Config { scrolling_history: 10_000, ..Default::default() };
+        let config = term::Config { scrolling_history: history, ..Default::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, replies)));
         let (t, pid_s, id_s) = (term.clone(), id.to_string(), id.to_string());
         std::thread::Builder::new().name(format!("zeit pane {pid_s}")).spawn(move || read_loop(reader, t, id_s, events))?;
@@ -122,6 +122,7 @@ impl Pane {
         let cols = t.columns();
         let content = t.renderable_content();
         let offset = content.display_offset as i32;
+        let selection = content.selection;
         let mut out: Vec<Vec<Cell>> = vec![vec![Cell::default(); cols]; rows];
         for ic in content.display_iter {
             let r = ic.point.line.0 + offset;
@@ -138,6 +139,7 @@ impl Pane {
             if f.contains(Flags::DIM) { flags |= zeit_proto::DIM; }
             if f.contains(Flags::STRIKEOUT) { flags |= zeit_proto::STRIKE; }
             if f.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) { flags |= zeit_proto::SPACER; }
+            if selection.is_some_and(|s| s.contains(ic.point)) { flags ^= zeit_proto::REVERSE; }
             let mut text = String::new();
             text.push(if f.contains(Flags::HIDDEN) || c.c.is_control() { ' ' } else { c.c });
             if let Some(z) = c.zerowidth() {
@@ -185,6 +187,10 @@ impl Pane {
     /// How far the view is scrolled back (0: live).
     pub fn scrolled(&self) -> usize {
         self.term.lock().grid().display_offset()
+    }
+
+    pub fn clear_history(&self) {
+        self.term.lock().grid_mut().clear_history();
     }
 
     /// The screen as plain text (capture-pane).

@@ -427,6 +427,9 @@ boxed list in the grid, a notice a line in the status bar.
 - Its own project (works without zash); shares the emulation core with zash.
 - tmux's words and verbs, tmux.conf's keys; nothing to relearn.
 - Rust, no C dependencies beyond libc.
+- Config in Lua (init.lua, `z.*`); configs and plugins in Rust come through
+  WASM (wasmtime, a `zeit-plugin` crate with the same API as `z.*`), so a Rust
+  config is a plugin compiled once and loaded like any other.
 
 ## Open
 

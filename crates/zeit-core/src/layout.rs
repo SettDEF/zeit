@@ -92,6 +92,37 @@ impl Layout {
         }
     }
 
+    /// `split-window -f`: the new pane takes a full side of the window.
+    pub fn split_full(&mut self, new: &str, side_by_side: bool, ratio: f32) {
+        let old = std::mem::replace(self, Layout::Leaf(String::new()));
+        *self = Layout::Split { side_by_side, ratio, a: Box::new(old), b: Box::new(Layout::Leaf(new.into())) };
+    }
+
+    /// Sets the share of the split that has `id` as its second half (`-l` / `-p`).
+    pub fn set_ratio_of(&mut self, id: &str, ratio: f32) {
+        if let Layout::Split { ratio: r, a, b, .. } = self {
+            if matches!(&**b, Layout::Leaf(x) if x == id) {
+                *r = ratio.clamp(0.05, 0.95);
+            } else {
+                a.set_ratio_of(id, ratio);
+                b.set_ratio_of(id, ratio);
+            }
+        }
+    }
+
+    /// Two panes trade places.
+    pub fn swap(&mut self, x: &str, y: &str) {
+        match self {
+            Layout::Leaf(id) if id == x => *id = y.to_string(),
+            Layout::Leaf(id) if id == y => *id = x.to_string(),
+            Layout::Leaf(_) => {}
+            Layout::Split { a, b, .. } => {
+                a.swap(x, y);
+                b.swap(x, y);
+            }
+        }
+    }
+
     /// The tree without pane `id` (its sibling takes the space); None when it was the last.
     pub fn remove(self, id: &str) -> Option<Layout> {
         match self {

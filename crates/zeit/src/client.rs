@@ -78,17 +78,35 @@ fn sgr(out: &mut String, c: &Cell) {
 
 /// Shows a session in this terminal until detached or ended.
 pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<String>) -> Result<String, String> {
-    // the prefix, as the server knows it (tmux.conf, or z.prefix in init.lua)
-    let prefix = {
+    // which keys are zeit's (tmux.conf and init.lua, as the server read them)
+    let mut keys = Keys { prefix: Chord::parse("C-b").unwrap(), table: Default::default(), root: Default::default(), copy: Default::default(), opts: Default::default() };
+    write_msg(&mut sock, &ClientMsg::Command(vec!["__keys".into()])).map_err(|e| e.to_string())?;
+    let reply = read_msg::<_, ServerMsg>(&mut sock);
+    if !matches!(reply, Ok(ServerMsg::Reply { ok: true, .. })) {
+        // an older server: its prefix, and tmux.conf's keys
+        keys = Keys::load();
         write_msg(&mut sock, &ClientMsg::Command(vec!["show-prefix".into()])).map_err(|e| e.to_string())?;
-        match read_msg::<_, ServerMsg>(&mut sock) {
-            Ok(ServerMsg::Reply { ok: true, text }) => Chord::parse(&text),
-            _ => None,
+        if let Ok(ServerMsg::Reply { ok: true, text }) = read_msg::<_, ServerMsg>(&mut sock) {
+            if let Some(p) = Chord::parse(&text) {
+                keys.prefix = p;
+            }
         }
-    };
-    let mut keys = Keys::load();
-    if let Some(p) = prefix {
-        keys.prefix = p;
+    }
+    if let Ok(ServerMsg::Reply { ok: true, text }) = reply {
+        for line in text.lines() {
+            let Some((kind, k)) = line.split_once(' ') else { continue };
+            let Some(c) = Chord::parse(k) else { continue };
+            let b = zeit_core::keys::Binding { action: zeit_core::keys::Action::Seq(Vec::new()), cmd: String::new(), repeat: kind == "repeat" };
+            match kind {
+                "prefix" => keys.prefix = c,
+                "root" => {
+                    keys.root.insert(c, b);
+                }
+                _ => {
+                    keys.table.insert(c, b);
+                }
+            }
+        }
     }
     let (cols, rows) = size();
     write_msg(&mut sock, &ClientMsg::Attach { session, place, cols, rows }).map_err(|e| e.to_string())?;

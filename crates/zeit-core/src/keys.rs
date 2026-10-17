@@ -1,9 +1,4 @@
-//! Pane and window keys, read from a tmux config: zeit does what the user's tmux
-//! would do for the same keys (the prefix, `bind-key`, `-n`, `-r`), so moving
-//! from tmux to zeit needs no new habits. Commands zeit has no
-//! equivalent for are skipped.
-//!
-//! Without a tmux config the tmux defaults apply (prefix Ctrl+B, % and " split).
+//! The user's tmux.conf: keys, options and colours (tmux defaults without one).
 
 use std::collections::HashMap;
 
@@ -95,6 +90,8 @@ impl Chord {
 #[derive(Clone, Debug)]
 pub struct Binding {
     pub action: Action,
+    /// the tmux command line as written (zeit runs it as is)
+    pub cmd: String,
     /// `-r`: may repeat without the prefix for a moment
     pub repeat: bool,
 }
@@ -107,6 +104,10 @@ pub struct Keys {
     pub table: HashMap<Chord, Binding>,
     /// `-n`: no prefix needed
     pub root: HashMap<Chord, Binding>,
+    /// `-T copy-mode-vi`
+    pub copy: HashMap<Chord, Binding>,
+    /// `set-option` values, by name (`@user` options too)
+    pub opts: HashMap<String, String>,
 }
 
 /// One tmux command line → an action zash can do.
@@ -164,7 +165,7 @@ fn one(cmd: &str) -> Option<Action> {
 impl Keys {
     /// tmux's own defaults (prefix Ctrl+B).
     pub fn defaults() -> Keys {
-        let mut k = Keys { prefix: Chord::parse("C-b").unwrap(), table: HashMap::new(), root: HashMap::new() };
+        let mut k = Keys { prefix: Chord::parse("C-b").unwrap(), table: HashMap::new(), root: HashMap::new(), copy: HashMap::new(), opts: HashMap::new() };
         for line in [
             "bind % split-window -h",
             "bind '\"' split-window -v",
@@ -195,10 +196,34 @@ impl Keys {
     /// The defaults, then the user's tmux config on top (as tmux reads it).
     pub fn from_tmux_conf(text: &str) -> Keys {
         let mut k = Keys::defaults();
-        for line in text.lines() {
-            k.line(line);
-        }
+        k.text(text, 0);
         k
+    }
+
+    fn text(&mut self, text: &str, depth: u8) {
+        // a line ending in a backslash goes on
+        let mut joined = String::new();
+        for line in text.lines() {
+            let t = line.trim_end();
+            if let Some(head) = t.strip_suffix('\\').filter(|h| !h.ends_with('\\')) {
+                joined.push_str(head);
+                joined.push(' ');
+                continue;
+            }
+            joined.push_str(line);
+            let l = std::mem::take(&mut joined);
+            if let Some(path) = l.trim().strip_prefix("source-file").map(|r| r.split_whitespace().filter(|w| !w.starts_with('-')).collect::<Vec<_>>()) {
+                if depth < 4 {
+                    for p in path {
+                        if let Ok(t) = std::fs::read_to_string(expand(unquote(p))) {
+                            self.text(&t, depth + 1);
+                        }
+                    }
+                }
+                continue;
+            }
+            self.line(&l);
+        }
     }
 
     /// The user's tmux config, if there is one.
@@ -214,24 +239,22 @@ impl Keys {
     }
 
     fn line(&mut self, line: &str) {
-        // a comment ends the line (tmux: an unquoted #)
-        let line = match line.find(" #").or_else(|| line.find("\t#")) {
-            Some(i) => &line[..i],
-            None => line,
-        };
-        let line = line.trim();
-        if line.starts_with('#') || line.is_empty() {
+        let line = strip_comment(line).trim();
+        if line.is_empty() {
             return;
         }
         let words: Vec<&str> = line.split_whitespace().collect();
         match words[0] {
-            "set" | "set-option" => {
-                let rest: Vec<&str> = words[1..].iter().filter(|w| !w.starts_with('-')).copied().collect();
-                if rest.first() == Some(&"prefix") {
-                    if let Some(c) = rest.get(1).and_then(|k| Chord::parse(unquote(k))) {
+            "set" | "set-option" | "setw" | "set-window-option" => {
+                let rest: Vec<&str> = words[1..].iter().skip_while(|w| w.starts_with('-')).copied().collect();
+                let Some(name) = rest.first() else { return };
+                let value = unquote(&rest[1..].join(" ")).to_string();
+                if *name == "prefix" {
+                    if let Some(c) = Chord::parse(&value) {
                         self.prefix = c;
                     }
                 }
+                self.opts.insert(name.to_string(), value);
             }
             "unbind" | "unbind-key" => {
                 let no_prefix = words.iter().any(|w| *w == "-n");
@@ -240,18 +263,24 @@ impl Keys {
                 }
             }
             "bind" | "bind-key" => {
-                let (mut no_prefix, mut repeat, mut i) = (false, false, 1);
+                let (mut table, mut repeat, mut i) = ("prefix", false, 1);
                 while let Some(w) = words.get(i) {
                     match *w {
-                        "-n" => no_prefix = true,
+                        "-n" => table = "root",
                         "-r" => repeat = true,
                         "-T" => {
-                            // another key table: only "root" (= -n) is followed
-                            if words.get(i + 1) == Some(&"root") { no_prefix = true } else { return }
+                            table = match words.get(i + 1).copied() {
+                                Some("root") => "root",
+                                Some("prefix") => "prefix",
+                                Some("copy-mode-vi") => "copy",
+                                _ => return,
+                            };
                             i += 1;
                         }
                         w if w.starts_with('-') && w.len() > 1 && w != "-" => {
-                            no_prefix |= w.contains('n');
+                            if w.contains('n') {
+                                table = "root";
+                            }
                             repeat |= w.contains('r');
                         }
                         _ => break,
@@ -260,19 +289,38 @@ impl Keys {
                 }
                 let Some(key) = words.get(i).and_then(|k| Chord::parse(unquote(k))) else { return };
                 let cmd = words[i + 1..].join(" ");
-                let table = if no_prefix { &mut self.root } else { &mut self.table };
-                match action(&cmd) {
-                    Some(a) => {
-                        table.insert(key, Binding { action: a, repeat });
-                    }
-                    // rebound to something zash does not do: the old meaning is gone too
-                    None => {
-                        table.remove(&key);
-                    }
-                }
+                let b = Binding { action: action(&cmd).unwrap_or(Action::Seq(Vec::new())), cmd, repeat };
+                match table {
+                    "root" => self.root.insert(key, b),
+                    "copy" => self.copy.insert(key, b),
+                    _ => self.table.insert(key, b),
+                };
             }
             _ => {}
         }
+    }
+}
+
+/// The line without its comment (an unquoted #).
+fn strip_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut prev = ' ';
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(q), c) if c == q => quote = None,
+            (None, '#') if prev.is_whitespace() => return &line[..i],
+            _ => {}
+        }
+        prev = c;
+    }
+    line
+}
+
+fn expand(p: &str) -> std::path::PathBuf {
+    match p.strip_prefix("~/") {
+        Some(r) => std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(r),
+        None => std::path::PathBuf::from(p),
     }
 }
 
@@ -323,8 +371,9 @@ bind-key r source-file ~/.config/tmux/tmux.conf \; display-message "reloaded"
         assert_eq!(k.root[&c("M-h")].action, Action::PrevTab);
         assert_eq!(k.root[&c("M-o")].action, Action::Seq(vec![Action::FocusNext, Action::Zoom]));
         assert_eq!(k.table[&c("c")].action, Action::NewTab);
-        // a command zash cannot run is not bound (and not left at its default)
-        assert!(!k.table.contains_key(&c("r")));
+        // every binding keeps its command line, which zeit runs
+        assert_eq!(k.table[&c("r")].cmd, r#"source-file ~/.config/tmux/tmux.conf \; display-message "reloaded""#);
+        assert_eq!(k.opts["prefix"], "C-Space");
         // tmux defaults the config did not touch stay
         assert_eq!(k.table[&c("%")].action, Action::Split { side_by_side: true });
     }
