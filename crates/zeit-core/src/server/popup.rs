@@ -325,9 +325,12 @@ impl Server {
         let others: Vec<String> = self.popups.get(sid).map(|l| l.iter().filter(|o| o.pane != p.pane).map(|o| o.name.clone()).collect()).unwrap_or_default();
         let (tf, tb) = if below { (Color::Indexed(0), self.look.border) } else { (self.look.on_primary, self.look.primary) };
         write_text(grid, outer.y as usize, outer.x as usize + 2, &format!(" {}{} ", p.name, if below { " · prefix Tab: up" } else { "" }), tf, tb, zeit_proto::BOLD);
+        // the buttons on the right of the frame: presets ⌄, hide –, close ×
+        let bx = (outer.x + outer.w).saturating_sub(9);
+        write_text(grid, outer.y as usize, bx as usize, " ⌄ – × ", fg, Color::Default, zeit_proto::BOLD);
         if !others.is_empty() {
             let more = format!(" {} ", others.join(" · "));
-            let x = (outer.x + outer.w).saturating_sub(more.chars().count() as u16 + 2);
+            let x = bx.saturating_sub(more.chars().count() as u16);
             write_text(grid, outer.y as usize, x as usize, &more, fg, Color::Default, 0);
         }
         let (screen, cur, shape) = pane.screen();
@@ -408,6 +411,35 @@ impl Server {
         }
         let Some(p) = self.shown_popup(sid).cloned() else { return false };
         let (outer, inner) = self.popup_rect(&p);
+        // the frame's buttons
+        if cy == outer.y {
+            let bx = (outer.x + outer.w).saturating_sub(9);
+            let what = match cx.checked_sub(bx) {
+                Some(1) => Some("menu"),
+                Some(3) => Some("hide"),
+                Some(5) => Some("close"),
+                _ => None,
+            };
+            if let Some(w) = what {
+                match w {
+                    "hide" => {
+                        self.popup_shown.remove(sid);
+                        self.popup_below.remove(sid);
+                    }
+                    "close" => {
+                        if let Some(pane) = self.panes.get(&p.pane) {
+                            pane.hang_up();
+                        }
+                    }
+                    _ => {
+                        let items = ["center", "top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right"].iter().map(|s| (s.replace('-', " "), s.to_string())).collect();
+                        self.open_overlay(cid, Overlay::Choose { items, sel: 0, template: Some("popup-align %%".into()) });
+                    }
+                }
+                self.dirty = true;
+                return true;
+            }
+        }
         let inside = |r: Rect| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h;
         let (alt, ctrl) = (b & 8 != 0, b & 16 != 0);
         if !inside(outer) || (inside(inner) && !alt && !ctrl) {

@@ -65,6 +65,8 @@ struct Client {
     last_rows: String,
     /// the web panes last told to the terminal: id → (x, y, w, h, focused)
     last_pins: HashMap<u32, (u16, u16, u16, u16, bool)>,
+    /// the zelt last told to the terminal (OSC 7733;zelt), to send only changes
+    last_zelt: String,
 }
 
 #[derive(Clone, Debug)]
@@ -308,7 +310,7 @@ impl Server {
                         }
                     }
                 });
-                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new() });
+                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new(), last_zelt: String::new() });
             }
             Ev::Gone(id) => {
                 self.clients.remove(&id);
@@ -1007,6 +1009,19 @@ impl Server {
             self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
         }
         // job lines, for terminals that draw them small (zash); sent when they change
+        // the shown zelt, for terminals that draw its frame themselves (zash): where, focus, name
+        let zelt = match self.shown_popup(&sid) {
+            Some(p) => {
+                let (o, _) = self.popup_rect(p);
+                format!("\x1b]7733;zelt;id={};x={};y={};w={};h={};focus={};title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), p.name.replace([';', '\x07', '\x1b'], " "))
+            }
+            None => String::new(),
+        };
+        let old_zelt = self.clients.get_mut(&cid).map(|c| std::mem::replace(&mut c.last_zelt, zelt.clone())).unwrap_or_default();
+        if zelt != old_zelt {
+            let msg = if zelt.is_empty() { "\x1b]7733;zeltclose;\x07".to_string() } else { zelt };
+            self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
+        }
         let rows_msg = self.job_rows(&placed);
         if self.clients.get(&cid).is_some_and(|c| c.last_rows != rows_msg) {
             if let Some(c) = self.clients.get_mut(&cid) {
