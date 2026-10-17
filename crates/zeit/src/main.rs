@@ -1,6 +1,7 @@
 //! zeit: the command line, the text client, the server and the pane holders,
 //! in one binary.
 
+mod cli;
 mod client;
 
 use std::os::unix::net::UnixStream;
@@ -8,20 +9,36 @@ use std::path::PathBuf;
 use zeit_core::paths;
 use zeit_proto::{read_msg, write_msg, ClientMsg, ServerMsg, VERSION};
 
-const HELP: &str = "zeit — your shells keep running, and remember
+const HELP: &str = "**zeit** {version}
+Your shells keep running, and remember: a terminal multiplexer with tmux's keys.
 
-  zeit                     the session of this folder (made if new), attached
-  zeit attach [-t NAME]    attach (the latest session without -t)
-  zeit new [-s NAME] [-d]  a new session (-d: do not attach)
-  zeit ls                  list sessions
-  zeit kill-session -t NAME, kill-server
-  zeit split-window [-h], new-window, select-pane -L/-R/-U/-D, resize-pane -Z,
-       send-keys -t PANE KEYS…, capture-pane -p, list-windows, list-panes,
-       rename-window NAME, display-message -p TEXT, source-file, lua CODE
-       (tmux's verbs; inside a zeit pane they act on that pane)
+**Usage:**
+  `zeit`                       the session of this folder (made if new)
+  `zeit` <command> [<args>]    a command (inside a pane it acts on that pane)
 
-Keys: your tmux prefix and bindings (~/.config/tmux/tmux.conf); prefix d detaches.
-Config: ~/.config/zeit/init.lua (Lua: z.modules{…}, z.map, z.on), plugins/.";
+**Sessions:**
+  `attach` [`-t` <name>]       attach (the latest session without -t)
+  `new` [`-s` <name>] [`-d`]     a new session (-d: do not attach)
+  `ls`                       list sessions          `kill-session -t` <name>
+  `restart-server`           upgrade without losing anything (shells keep running)
+
+**Panes and windows:**
+  `split-window` [`-h`]        split (beside with -h)  `new-window` [`-n` <name>]
+  `select-pane -L/-R/-U/-D`  move                    `resize-pane -Z`  zoom
+  `select-layout` <name>     even-horizontal, even-vertical, main-*, tiled
+  `web` [`-h`|`-v`] <address>    a pane that is a web page (drawn by zash)
+
+**Jobs and history:**
+  `timeline` [`-a`]            what this pane ran (-a: every pane)
+  `jobs`, `job-run` [`-c` <dir>] `--` <command>   commands sent to other panes
+
+**Scripts:** tmux's verbs work: `send-keys`, `capture-pane -p`, `list-panes`,
+`display-message -p`, `if-shell`, `run-shell`, `set-option`, `lua` <code>
+
+**Keys:** your prefix and bindings (~/.config/zeit/init.lua, else tmux.conf);
+prefix `d` detaches, `:` command prompt, `T` timeline, `q` pane numbers.
+
+**Config:** ~/.config/zeit/init.lua: `z.modules{…}`, `z.map`, `z.set`, `z.rule`, `z.on`";
 
 fn fail(msg: &str) -> ! {
     eprintln!("zeit: {msg}");
@@ -136,7 +153,7 @@ fn main() {
                 fail(&e.to_string());
             }
         }
-        Some("-h") | Some("--help") | Some("help") => println!("{HELP}"),
+        Some("-h") | Some("--help") | Some("help") => cli::print(&HELP.replace("{version}", env!("CARGO_PKG_VERSION"))),
         Some("-V") | Some("--version") => println!("zeit {}", env!("CARGO_PKG_VERSION")),
         None => {
             let here = std::env::current_dir().map(|p| p.display().to_string()).ok();
