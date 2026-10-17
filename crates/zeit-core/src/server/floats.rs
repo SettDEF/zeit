@@ -210,7 +210,14 @@ impl Server {
                 let x = (area.x + (area.w - w) / 2 + step).min(area.x + area.w - w);
                 let y = (area.y + (area.h - h) / 2 + step / 2).min(area.y + area.h - h);
                 let dir = dir.or_else(|| here.as_ref().and_then(|p| self.panes.get(p)).map(|p| p.cwd())).or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_else(|| PathBuf::from("/"));
-                let argv = if rest.is_empty() { Vec::new() } else { vec!["/bin/sh".into(), "-c".into(), format!("exec {}", rest.join(" "))] };
+                // a command runs whole (; && too) and its output stays when it ends; none: a shell
+                let argv = if rest.is_empty() {
+                    Vec::new()
+                } else {
+                    let command = rest.join(" ");
+                    let shown = command.replace('\'', "'\\''");
+                    vec!["/bin/sh".into(), "-c".into(), format!("{command}\ns=$?\nprintf '\\n\\033[2m── %s ended (%s) · Enter closes ──\\033[0m' '{shown}' \"$s\"\nread _")]
+                };
                 let pane = self.start_pane(dir, argv)?;
                 // showing one shows the window's others too, as zellij does
                 let ids: Vec<String> = mine.iter().map(|f| f.pane.clone()).collect();
