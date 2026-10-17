@@ -86,6 +86,9 @@ pub enum ServerMsg {
     Reply { ok: bool, text: String },
     /// The client should leave: detached, or its session ended.
     Bye { reason: String },
+    /// escape sequences for the outer terminal, passed through from the focused pane
+    /// (the zash UI protocol: OSC 7733 popups and the like)
+    Passthrough(Vec<u8>),
 }
 
 // ── pane holder ⇄ server ──

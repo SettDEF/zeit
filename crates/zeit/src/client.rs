@@ -137,6 +137,10 @@ pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<Strin
                     let _ = stdout.write_all(out.as_bytes());
                     let _ = stdout.flush();
                 }
+                Ok(ServerMsg::Passthrough(seq)) => {
+                    let _ = stdout.write_all(&seq);
+                    let _ = stdout.flush();
+                }
                 Ok(ServerMsg::Bye { reason }) => return reason,
                 Ok(_) => {}
                 Err(_) => return "the server went away".into(),

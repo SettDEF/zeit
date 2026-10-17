@@ -18,6 +18,8 @@ use zeit_proto::{read_msg, write_msg, Cell, Color, CursorShape, HolderMsg, ToHol
 #[derive(Debug)]
 pub enum PaneEvent {
     Output(String),
+    /// an OSC 7733 message (zash's UI protocol) for the terminal the pane is shown in
+    Passthrough(String, Vec<u8>),
     Exited(String, i32),
     /// the holder vanished without saying the shell ended
     Lost(String),
@@ -187,6 +189,9 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
                 for m in marks.scan(&bytes) {
                     crate::timeline::record(&id, m);
                 }
+                for seq in passthrough(&bytes) {
+                    let _ = events.send(PaneEvent::Passthrough(id.clone(), seq));
+                }
                 parser.advance(&mut *term.lock(), &bytes);
                 if events.send(PaneEvent::Output(id.clone())).is_err() {
                     return;
@@ -208,3 +213,20 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
 
 #[allow(dead_code)]
 fn _dims<T: Dimensions>(_: &T) {}
+
+/// zash's UI messages (OSC 7733 …, ended by BEL) in a chunk of output, whole.
+fn passthrough(chunk: &[u8]) -> Vec<Vec<u8>> {
+    const HEAD: &[u8] = b"\x1b]7733;";
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(p) = chunk[i..].windows(HEAD.len()).position(|w| w == HEAD) {
+        let start = i + p;
+        let Some(end) = chunk[start..].iter().position(|&b| b == 0x07).map(|e| start + e + 1) else { break };
+        // popups only: Neovim mode (7733;nvim) belongs to the pane, not to the outer window
+        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") {
+            out.push(chunk[start..end].to_vec());
+        }
+        i = end;
+    }
+    out
+}

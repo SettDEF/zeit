@@ -69,6 +69,8 @@ pub struct Server {
     /// the size panes are laid out for (the latest client's)
     size: (u16, u16),
     dirty: bool,
+    /// passthrough sequences for a client, sent after its next frame (so the cursor is right)
+    pending: HashMap<u64, Vec<Vec<u8>>>,
 }
 
 type Reply = Result<String, String>;
@@ -109,7 +111,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
         keys.prefix = p;
     }
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new() };
     s.restore();
     loop {
         let Ok(ev) = rx.recv() else { break };
@@ -209,6 +211,14 @@ impl Server {
             }
             Ev::Msg(id, m) => self.message(id, m),
             Ev::Pane(PaneEvent::Output(_)) => self.dirty = true,
+            Ev::Pane(PaneEvent::Passthrough(pane, seq)) => {
+                // to the clients showing that pane in front
+                let ids: Vec<u64> = self.clients.keys().copied().filter(|c| self.client_pane(*c).as_deref() == Some(pane.as_str())).collect();
+                for c in ids {
+                    self.pending.entry(c).or_default().push(seq.clone());
+                }
+                self.dirty = true;
+            }
             Ev::Pane(PaneEvent::Exited(id, code)) => self.pane_gone(&id, code),
             Ev::Pane(PaneEvent::Lost(id)) => self.pane_gone(&id, -1),
         }
@@ -552,6 +562,9 @@ impl Server {
         c.last = grid;
         let frame = Frame { cols, rows, changed, cursor, cursor_shape: shape, title };
         self.send(cid, &ServerMsg::Frame(frame));
+        for seq in self.pending.remove(&cid).unwrap_or_default() {
+            self.send(cid, &ServerMsg::Passthrough(seq));
+        }
     }
 
     fn window_title(&self, w: &Window) -> String {
