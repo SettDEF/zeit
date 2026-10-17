@@ -437,3 +437,9 @@ boxed list in the grid, a notice a line in the status bar.
   ones may safely be restarted?).
 - Whether zash's own splits stay a separate (local-only) mode or always go
   through zeitd (simpler code if always; one more process if so).
+- **A run-everything overlay (the user's idea, 2026-10-17; name to be chosen).**
+  Commands (and Claude Code) run in the background, and their output shows in a
+  popup drawn *inside* zeit, over the panes: not a pane, not a zeit window, not a
+  desktop window. Comes and goes with a key, survives detaching, and several
+  runs stack in it (zeit's jobs are the natural base: they already run without a
+  pane and keep their output).
