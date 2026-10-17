@@ -4,8 +4,8 @@
 local z = require('zeit')
 z.zfloat('claude', {
   width = 30,          -- % of the screen
-  height = 100,
-  side = 'right',      -- right, left, top-right, bottom-right, top-left, bottom-left, center
+  height = 70,         -- % of the screen
+  side = 'top-right',  -- right, left, top-right, bottom-right, top-left, bottom-left, center
   below = true,        -- the keys stay with Claude (prefix Tab moves them up into the view)
   title = 'Claude',
   buttons = true,      -- presets, hide, close on its frame

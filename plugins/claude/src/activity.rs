@@ -65,7 +65,12 @@ pub fn hook() {
             e["err"] = tail(&err).into();
             e["failed"] = (r.get("interrupted").and_then(|x| x.as_bool()).unwrap_or(false) || (!err.is_empty() && out.is_empty())).into();
         }
-        "UserPromptSubmit" | "Stop" => {}
+        "UserPromptSubmit" => {
+            // the prompt, for the view's headers (long ones folded there)
+            let p = v.get("prompt").and_then(|p| p.as_str()).unwrap_or("");
+            e["prompt"] = p.chars().take(4000).collect::<String>().into();
+        }
+        "Stop" => {}
         _ => return,
     }
     let f = file_for(&pane);
@@ -96,39 +101,51 @@ struct Entry {
     failed: bool,
 }
 
-fn read_entries(path: &PathBuf) -> (Vec<Entry>, Option<u64>) {
+/// One prompt and what Claude did for it.
+struct Turn {
+    prompt: String,
+    start: u64,
+    /// when Claude was done with it (Stop)
+    end: Option<u64>,
+    steps: Vec<Entry>,
+}
+
+fn read_turns(path: &PathBuf) -> Vec<Turn> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
-    let mut list: Vec<Entry> = Vec::new();
-    let mut idle_since = None;
+    let mut turns: Vec<Turn> = Vec::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let t = v.get("t").and_then(|x| x.as_u64()).unwrap_or(0);
         match s("event").as_str() {
-            // a new prompt: what came before is history
-            "UserPromptSubmit" => {
-                list.clear();
-                idle_since = None;
-            }
+            "UserPromptSubmit" => turns.push(Turn { prompt: s("prompt"), start: t, end: None, steps: Vec::new() }),
             "PreToolUse" => {
-                list.push(Entry { tool: s("tool"), what: s("what"), desc: s("desc"), start: t, end: None, out: String::new(), err: String::new(), failed: false });
-                idle_since = None;
+                if turns.is_empty() {
+                    turns.push(Turn { prompt: String::new(), start: t, end: None, steps: Vec::new() });
+                }
+                let turn = turns.last_mut().unwrap();
+                turn.end = None;
+                turn.steps.push(Entry { tool: s("tool"), what: s("what"), desc: s("desc"), start: t, end: None, out: String::new(), err: String::new(), failed: false });
             }
             "PostToolUse" => {
                 // the latest unfinished call of that tool
                 let tool = s("tool");
-                if let Some(e) = list.iter_mut().rev().find(|e| e.end.is_none() && e.tool == tool) {
+                if let Some(e) = turns.iter_mut().rev().flat_map(|t| t.steps.iter_mut().rev()).find(|e| e.end.is_none() && e.tool == tool) {
                     e.end = Some(t);
                     e.out = s("out");
                     e.err = s("err");
                     e.failed = v.get("failed").and_then(|x| x.as_bool()).unwrap_or(false);
                 }
             }
-            "Stop" => idle_since = Some(t),
+            "Stop" => {
+                if let Some(turn) = turns.last_mut() {
+                    turn.end = Some(t);
+                }
+            }
             _ => {}
         }
     }
-    (list, idle_since)
+    turns
 }
 
 fn size() -> (usize, usize) {
@@ -146,75 +163,212 @@ fn cut(s: &str, n: usize) -> String {
     t
 }
 
+/// Lines of at most `w` characters (a long prompt, read in full when its turn is open).
+fn wrap(s: &str, w: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for para in s.lines() {
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > w {
+                out.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(&cut(word, w));
+        }
+        out.push(line);
+    }
+    out
+}
+
 fn secs(ms: u64) -> String {
     if ms < 1000 { format!("{ms} ms") } else if ms < 60_000 { format!("{:.1} s", ms as f64 / 1000.0) } else { format!("{}m{:02}s", ms / 60_000, (ms / 1000) % 60) }
 }
 
-/// `zeit-claude view FILE`: the view. Redraws when the file changes, and while something runs.
+/// The view's keys and clicks, read without waiting (raw, the mouse asked for).
+struct Input {
+    old: libc::termios,
+}
+
+impl Input {
+    fn start() -> Input {
+        let mut old: libc::termios = unsafe { std::mem::zeroed() };
+        unsafe { libc::tcgetattr(0, &mut old) };
+        let mut raw = old;
+        unsafe { libc::cfmakeraw(&mut raw) };
+        raw.c_oflag = old.c_oflag; // keep \n → \r\n
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw) };
+        unsafe { libc::fcntl(0, libc::F_SETFL, libc::fcntl(0, libc::F_GETFL) | libc::O_NONBLOCK) };
+        // clicks (and the wheel) come to the view, as SGR reports
+        print!("\x1b[?1000h\x1b[?1006h");
+        Input { old }
+    }
+
+    fn read(&self) -> Vec<u8> {
+        let mut buf = [0u8; 256];
+        let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 { buf[..n as usize].to_vec() } else { Vec::new() }
+    }
+}
+
+impl Drop for Input {
+    fn drop(&mut self) {
+        print!("\x1b[?1000l\x1b[?1006l");
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.old) };
+    }
+}
+
+/// `zeit-claude view FILE`: what Claude did, by prompt. The newest prompt is open, older ones
+/// folded to a line; a click on a prompt (or j/k and Enter) opens or folds it.
 pub fn view(path: &str) {
     let path = PathBuf::from(path);
+    let input = Input::start();
     print!("\x1b[?25l\x1b[?7l");
     let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let (mut last_len, mut last_size, mut tick) = (u64::MAX, (0, 0), 0usize);
+    // which turns are open (by their start), which header is chosen, how far up it is scrolled
+    let mut open: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
+    let (mut sel, mut scroll, mut tick) = (usize::MAX, 0usize, 0usize);
+    let (mut last_len, mut last_size, mut dirty) = (u64::MAX, (0, 0), true);
+    // which screen row shows which turn's header (for clicks)
+    let mut header_rows: Vec<(usize, usize)> = Vec::new();
     loop {
+        let turns = read_turns(&path);
+        let n = turns.len();
+        if sel >= n {
+            sel = n.saturating_sub(1);
+        }
+        // keys and clicks
+        let bytes = input.read();
+        let mut i = 0;
+        while i < bytes.len() {
+            let rest = &bytes[i..];
+            if let Some(end) = rest.starts_with(b"\x1b[<").then(|| rest.iter().position(|c| *c == b'M' || *c == b'm')).flatten() {
+                let spec = String::from_utf8_lossy(&rest[3..end]).to_string();
+                let parts: Vec<u32> = spec.split(';').filter_map(|p| p.parse().ok()).collect();
+                if let [b, _x, y] = parts[..] {
+                    let press = rest[end] == b'M';
+                    match b {
+                        64 => scroll += 3,
+                        65 => scroll = scroll.saturating_sub(3),
+                        0 if press => {
+                            if let Some(&(_, t)) = header_rows.iter().find(|(row, _)| *row + 1 == y as usize) {
+                                sel = t;
+                                let k = turns[t].start;
+                                let now = *open.get(&k).unwrap_or(&(t + 1 == n));
+                                open.insert(k, !now);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                i += end + 1;
+                dirty = true;
+                continue;
+            }
+            match rest[0] {
+                b'j' => sel = (sel + 1).min(n.saturating_sub(1)),
+                b'k' => sel = sel.saturating_sub(1),
+                b'\r' | b' ' if n > 0 => {
+                    let k = turns[sel].start;
+                    let now = *open.get(&k).unwrap_or(&(sel + 1 == n));
+                    open.insert(k, !now);
+                }
+                b'a' => turns.iter().for_each(|t| { open.insert(t.start, true); }),
+                b'c' => turns.iter().for_each(|t| { open.insert(t.start, false); }),
+                b'G' => scroll = 0,
+                _ => {}
+            }
+            i += 1;
+            dirty = true;
+        }
         let len = std::fs::metadata(&path).map_or(0, |m| m.len());
-        let (entries, idle) = read_entries(&path);
-        let running = entries.iter().any(|e| e.end.is_none());
+        let running = turns.last().is_some_and(|t| t.steps.iter().any(|e| e.end.is_none()));
         let sz = size();
-        if len != last_len || sz != last_size || running {
-            last_len = len;
-            last_size = sz;
+        if len != last_len {
+            // something new: back to the newest, which is open
+            scroll = 0;
+            sel = n.saturating_sub(1);
+        }
+        if dirty || len != last_len || sz != last_size || running {
+            (last_len, last_size, dirty) = (len, sz, false);
             let (w, h) = sz;
             let mut lines: Vec<String> = Vec::new();
-            for e in &entries {
-                let icon = match (e.end, e.failed) {
-                    (None, _) => format!("\x1b[33m{}\x1b[0m", frames[tick % frames.len()]),
-                    (Some(_), true) => "\x1b[31m✖\x1b[0m".into(),
-                    (Some(_), false) => "\x1b[32m✔\x1b[0m".into(),
-                };
-                let took = e.end.map(|t| secs(t.saturating_sub(e.start))).unwrap_or_else(|| secs(now_ms().saturating_sub(e.start)));
-                let (glyph, colour) = match e.tool.as_str() {
-                    "Bash" => ("❯", "36"),
-                    "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ("✎", "35"),
-                    "Read" | "Grep" | "Glob" => ("·", "90"),
-                    "WebFetch" | "WebSearch" => ("⌕", "34"),
-                    "Task" | "Agent" => ("⧉", "34"),
-                    _ => ("•", "90"),
-                };
-                let room = w.saturating_sub(took.chars().count() + 6);
-                lines.push(format!("{icon} \x1b[{colour}m{glyph}\x1b[0m {}{}\x1b[90m{took}\x1b[0m", cut(&e.what, room), " ".repeat(room.saturating_sub(e.what.chars().count().min(room)) + 1)));
-                if e.tool == "Bash" {
-                    if !e.desc.is_empty() && e.end.is_none() {
-                        lines.push(format!("    \x1b[90m{}\x1b[0m", cut(&e.desc, w.saturating_sub(4))));
+            let mut heads: Vec<(usize, usize)> = Vec::new();
+            for (ti, turn) in turns.iter().enumerate() {
+                let is_open = *open.get(&turn.start).unwrap_or(&(ti + 1 == n));
+                let working = turn.steps.iter().any(|e| e.end.is_none()) || (turn.end.is_none() && ti + 1 == n);
+                let took = secs(turn.end.unwrap_or_else(now_ms).saturating_sub(turn.start));
+                let state = if working { format!("\x1b[33m{}\x1b[39m", frames[tick % frames.len()]) } else { "\x1b[32m✔\x1b[39m".into() };
+                let arrow = if is_open { "▾" } else { "▸" };
+                let first = turn.prompt.lines().next().unwrap_or("").trim();
+                let first = if first.is_empty() { "(Claude)" } else { first };
+                let info = format!("{} · {took}", turn.steps.len());
+                let room = w.saturating_sub(info.chars().count() + 7);
+                let chosen = ti == sel;
+                let (on, off) = if chosen { ("\x1b[7m", "\x1b[27m") } else { ("", "") };
+                heads.push((lines.len(), ti));
+                lines.push(format!("{on}{arrow} {state} \x1b[1m{}\x1b[22m{}\x1b[90m{info}\x1b[39m{off}\x1b[0m", cut(first, room), " ".repeat(room.saturating_sub(first.chars().count().min(room)) + 1)));
+                if !is_open {
+                    continue;
+                }
+                // the whole prompt, when it is longer than its header
+                let full = wrap(turn.prompt.trim(), w.saturating_sub(4));
+                if full.len() > 1 || turn.prompt.trim().chars().count() > room {
+                    for l in full.iter().take(12) {
+                        lines.push(format!("  \x1b[3;90m{l}\x1b[0m"));
                     }
-                    // the command's last lines, its errors in red
-                    for l in e.out.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
-                        lines.push(format!("    \x1b[2m{}\x1b[0m", cut(l, w.saturating_sub(4))));
+                    if full.len() > 12 {
+                        lines.push(format!("  \x1b[90m… {} more lines\x1b[0m", full.len() - 12));
                     }
-                    for l in e.err.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev() {
-                        lines.push(format!("    \x1b[31m{}\x1b[0m", cut(l, w.saturating_sub(4))));
+                }
+                for e in &turn.steps {
+                    let icon = match (e.end, e.failed) {
+                        (None, _) => format!("\x1b[33m{}\x1b[0m", frames[tick % frames.len()]),
+                        (Some(_), true) => "\x1b[31m✖\x1b[0m".into(),
+                        (Some(_), false) => "\x1b[32m✔\x1b[0m".into(),
+                    };
+                    let took = e.end.map(|t| secs(t.saturating_sub(e.start))).unwrap_or_else(|| secs(now_ms().saturating_sub(e.start)));
+                    let (glyph, colour) = match e.tool.as_str() {
+                        "Bash" => ("❯", "36"),
+                        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ("✎", "35"),
+                        "Read" | "Grep" | "Glob" => ("·", "90"),
+                        "WebFetch" | "WebSearch" => ("⌕", "34"),
+                        "Task" | "Agent" => ("⧉", "34"),
+                        _ => ("•", "90"),
+                    };
+                    let room = w.saturating_sub(took.chars().count() + 8);
+                    lines.push(format!("  {icon} \x1b[{colour}m{glyph}\x1b[0m {}{}\x1b[90m{took}\x1b[0m", cut(&e.what, room), " ".repeat(room.saturating_sub(e.what.chars().count().min(room)) + 1)));
+                    if e.tool == "Bash" {
+                        if !e.desc.is_empty() && e.end.is_none() {
+                            lines.push(format!("      \x1b[90m{}\x1b[0m", cut(&e.desc, w.saturating_sub(6))));
+                        }
+                        for l in e.out.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
+                            lines.push(format!("      \x1b[2m{}\x1b[0m", cut(l, w.saturating_sub(6))));
+                        }
+                        for l in e.err.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev() {
+                            lines.push(format!("      \x1b[31m{}\x1b[0m", cut(l, w.saturating_sub(6))));
+                        }
                     }
                 }
             }
-            let done = entries.iter().filter(|e| e.end.is_some()).count();
-            let head = match (running, idle) {
-                (true, _) => format!(" \x1b[33m●\x1b[0m \x1b[1mworking\x1b[0m \x1b[90m· {done} done\x1b[0m"),
-                (false, Some(_)) => format!(" \x1b[32m●\x1b[0m \x1b[1mdone\x1b[0m \x1b[90m· {} steps\x1b[0m", entries.len()),
-                _ if entries.is_empty() => " \x1b[90mwhat Claude runs shows here\x1b[0m".to_string(),
-                _ => format!(" \x1b[90m●\x1b[0m \x1b[1mwaiting\x1b[0m \x1b[90m· {} steps\x1b[0m", entries.len()),
-            };
-            // the newest at the bottom, as a terminal does
-            let body = h.saturating_sub(2);
-            let start = lines.len().saturating_sub(body);
+            if lines.is_empty() {
+                lines.push(" \x1b[90mwhat Claude runs shows here\x1b[0m".into());
+            }
+            // the newest at the bottom, as a terminal does; the wheel scrolls up
+            let body = h.saturating_sub(1);
+            scroll = scroll.min(lines.len().saturating_sub(body));
+            let end = lines.len() - scroll;
+            let start = end.saturating_sub(body);
+            header_rows = heads.iter().filter(|(l, _)| *l >= start && *l < end).map(|(l, t)| (l - start, *t)).collect();
             let mut out = String::from("\x1b[H\x1b[2J");
-            out.push_str(&head);
-            out.push_str("\r\n\r\n");
-            out.push_str(&lines[start..].join("\r\n"));
+            out.push_str(&lines[start..end].join("\r\n"));
+            let hint = if scroll > 0 { format!("↑ {scroll} · G back down") } else { "click a prompt · j k Enter · a c".to_string() };
+            out.push_str(&format!("\x1b[{h};1H\x1b[2K\x1b[90m{}\x1b[0m", cut(&hint, w)));
             print!("{out}");
             let _ = std::io::stdout().flush();
         }
         tick += 1;
-        std::thread::sleep(Duration::from_millis(if running { 120 } else { 400 }));
+        std::thread::sleep(Duration::from_millis(if running { 120 } else { 200 }));
     }
 }
-
