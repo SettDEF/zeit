@@ -215,6 +215,19 @@ zash window and a pane in a zeit session behave the same.
 - **Projects.** `zeit p [folder]` opens the session for a project (made from
   a template the first time: windows, splits, commands, like tmuxinator but in
   Lua or a plain table); zett opens a project's session next to its files.
+- **Command rules.** When a command starts, Lua decides where it runs (asked
+  by the shell integration before the line executes; no rule = it runs where
+  typed):
+  ```lua
+  z.on_command(function(cmd)
+    if cmd:match('^cargo build') or cmd:match('^make') then
+      return { pane = 'bottom', size = '30%', close = 'on-success', focus = false }
+    end
+    if cmd:match('^npm run dev') then return { float = 'popout', remember = true } end
+  end)
+  ```
+  A bottom pane for builds that closes when they pass and stays (and
+  notifies) when they fail, servers as remembered floats, ssh in new tabs.
 - **Long commands tell you.** Shell marks know when a command ends; one in a
   background pane that ran longer than a minute sends a desktop notification
   (or a quiet mark in the status line), with its exit status.
