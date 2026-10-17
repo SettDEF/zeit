@@ -29,6 +29,8 @@ struct Map {
     key: Chord,
     action: Action,
     repeat: bool,
+    /// what it does, for the keys window (z.map(…, { desc = "…" }))
+    desc: String,
 }
 
 #[derive(Default)]
@@ -162,6 +164,11 @@ impl Ext {
     }
 
     /// A key bound in Lua (`table` is "prefix" or "root"): runs it; false when none.
+    /// The keys Lua mapped: (table, key, what it runs or "(Lua)", its description); later ones win.
+    pub fn described(&self) -> Vec<(String, Chord, String, String)> {
+        self.st.borrow().maps.iter().map(|m| (m.table.clone(), m.key.clone(), match &m.action { Action::Cmd(c) => c.clone(), Action::Lua(_) => "(Lua)".into() }, m.desc.clone())).collect()
+    }
+
     pub fn key(&mut self, table: &str, key: &Chord) -> bool {
         enum Do {
             Cmd(String),
@@ -339,14 +346,15 @@ impl Ext {
             } else {
                 ("root", keys.clone())
             };
-            let repeat = opts.and_then(|o| o.get::<bool>("repeats").ok()).unwrap_or(false);
+            let repeat = opts.as_ref().and_then(|o| o.get::<bool>("repeats").ok()).unwrap_or(false);
+            let desc = opts.as_ref().and_then(|o| o.get::<String>("desc").ok()).unwrap_or_default();
             let key = Chord::parse(&k).ok_or_else(|| mlua::Error::RuntimeError(format!("not a key: {k}")))?;
             let action = match action {
                 Value::String(s) => Action::Cmd(s.to_string_lossy()),
                 Value::Function(f) => Action::Lua(lua.create_registry_value(f)?),
                 _ => return Err(mlua::Error::RuntimeError("z.map: a command line or a function".into())),
             };
-            st.borrow_mut().maps.push(Map { table: table.into(), key, action, repeat });
+            st.borrow_mut().maps.push(Map { table: table.into(), key, action, repeat, desc });
             Ok(())
         })?)?;
 

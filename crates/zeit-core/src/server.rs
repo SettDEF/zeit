@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 mod floats;
+mod keysview;
 mod popup;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
@@ -1838,6 +1839,11 @@ impl Server {
                 };
                 self.popup_command(cid, ctx.clone().or(target.clone()), &name, args)
             }
+            "list-keys" | "lsk" => Ok(self.list_keys(args.iter().any(|a| a == "-c"))),
+            // the keys window: every key, in a zfloat in the middle
+            "keys" => self.run_line(cid, ctx.clone(), "zfloat-toggle -n keys -w 70 -h 85 -a center 'zeit list-keys -c | less -RS'"),
+            "layer-up" => self.layer_move(cid, true),
+            "layer-down" => self.layer_move(cid, false),
             "float" | "new-float" | "toggle-floats" | "float-toggle" | "float-embed" | "float-next" | "float-close" => self.float_command(cid, ctx.clone().or(target.clone()), cmd, args),
             "if-shell" | "if" => {
                 let cond = positional.first().cloned().unwrap_or_default();

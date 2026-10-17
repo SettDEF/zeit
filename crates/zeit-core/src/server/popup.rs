@@ -3,6 +3,17 @@
 
 use super::*;
 
+/// An offset this far is "at the edge": the frame is clamped there, so a docked zfloat stays
+/// flush with that side whatever the screen's size.
+const EDGE: i16 = 10_000;
+
+/// The offsets of a side (right, top-left …): pinned to those edges.
+fn pinned(side: &str) -> (i16, i16) {
+    let dx = if side.contains("left") { -EDGE } else if side.contains("right") { EDGE } else { 0 };
+    let dy = if side.contains("top") { -EDGE } else if side.contains("bottom") { EDGE } else { 0 };
+    (dx, dy)
+}
+
 /// A popup of a session: its pane, its name, what it runs, its size in % of the screen.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(super) struct Popup {
@@ -40,6 +51,14 @@ impl Server {
         let w = (area.w as u32 * p.w.clamp(20, 100) as u32 / 100) as u16;
         let h = (area.h as u32 * p.h.clamp(20, 100) as u32 / 100) as u16;
         (w.max(10).min(area.w), h.max(4).min(area.h))
+    }
+
+    /// Where a zfloat really is, as an offset from the middle (a pinned one: at its edge).
+    pub(super) fn real_offset(&self, p: &Popup) -> (i16, i16) {
+        let area = self.area();
+        let (w, h) = self.popup_size(p);
+        let (ex, ey) = (((area.w - w) / 2) as i16, ((area.h - h) / 2) as i16);
+        (p.dx.clamp(-ex, ex), p.dy.clamp(-ey, ey))
     }
 
     pub(super) fn popup_rect(&self, p: &Popup) -> (Rect, Rect) {
@@ -199,7 +218,12 @@ impl Server {
                 let area = self.area();
                 let n: i16 = rest.first().and_then(|v| v.parse().ok()).unwrap_or(2);
                 let dir = args.iter().find(|a| matches!(a.as_str(), "-U" | "-D" | "-L" | "-R" | "-c")).cloned().unwrap_or_default();
+                // from where it really is (a pinned one leaves its edge)
+                let real = self.popups.get(&sid).and_then(|l| l.iter().find(|p| p.pane == shown)).map(|p| self.real_offset(p));
                 if let Some(p) = self.popups.get_mut(&sid).and_then(|l| l.iter_mut().find(|p| p.pane == shown)) {
+                    if let Some((rx, ry)) = real {
+                        (p.dx, p.dy) = (rx, ry);
+                    }
                     match dir.as_str() {
                         "-U" => p.dy -= n,
                         "-D" => p.dy += n,
@@ -218,10 +242,8 @@ impl Server {
                 let shown = self.popup_shown.get(&sid).cloned().ok_or("no popup shown")?;
                 let area = self.area();
                 let to = rest.first().cloned().unwrap_or_else(|| "center".into());
-                let size = self.popups.get(&sid).and_then(|l| l.iter().find(|p| p.pane == shown)).map(|p| self.popup_size(p)).unwrap_or((area.w, area.h));
-                let (ex, ey) = (((area.w - size.0) / 2) as i16, ((area.h - size.1) / 2) as i16);
-                let dx = if to.contains("left") { -ex } else if to.contains("right") { ex } else { 0 };
-                let dy = if to.contains("top") { -ey } else if to.contains("bottom") { ey } else { 0 };
+                let _ = area;
+                let (dx, dy) = pinned(&to);
                 if !matches!(to.as_str(), "center" | "centre" | "top" | "bottom" | "left" | "right" | "top-left" | "top-right" | "bottom-left" | "bottom-right") {
                     return Err("zfloat-align center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right".into());
                 }
@@ -297,12 +319,9 @@ impl Server {
                         let mut p = Popup { pane: pane.clone(), name: label, cmd: command, w, h, dx: 0, dy: 0, ax: 0.0, ay: 0.0 };
                         if let Some(s) = &side {
                             // at that side from the start (no glide in from the middle)
-                            let area = self.area();
-                            let (pw, ph) = self.popup_size(&p);
-                            let (ex, ey) = (((area.w - pw) / 2) as i16, ((area.h - ph) / 2) as i16);
-                            p.dx = if s.contains("left") { -ex } else if s.contains("right") { ex } else { 0 };
-                            p.dy = if s.contains("top") { -ey } else if s.contains("bottom") { ey } else { 0 };
-                            (p.ax, p.ay) = (p.dx as f32, p.dy as f32);
+                            (p.dx, p.dy) = pinned(s);
+                            let (rx, ry) = self.real_offset(&p);
+                            (p.ax, p.ay) = (rx as f32, ry as f32);
                         }
                         self.popups.entry(sid.clone()).or_default().push(p);
                         self.popup_shown.insert(sid.clone(), pane);
@@ -376,8 +395,10 @@ impl Server {
     /// the next step comes in a frame's time.
     pub(super) fn animate_popups(&mut self) {
         let mut moving = false;
-        for p in self.popups.values_mut().flatten() {
-            let (tx, ty) = (p.dx as f32, p.dy as f32);
+        // where each really goes (a pinned one: its edge, so the glide ends there)
+        let targets: Vec<(i16, i16)> = self.popups.values().flatten().map(|p| self.real_offset(p)).collect();
+        for (p, (rx, ry)) in self.popups.values_mut().flatten().zip(targets) {
+            let (tx, ty) = (rx as f32, ry as f32);
             for (a, t) in [(&mut p.ax, tx), (&mut p.ay, ty)] {
                 let d = t - *a;
                 if d.abs() < 0.5 {
@@ -474,7 +495,7 @@ impl Server {
         // the frame's bottom-right corner resizes too
         let corner = cx + 1 == outer.x + outer.w && cy + 1 == outer.y + outer.h;
         let size = self.popup_size(&p);
-        self.popup_drags.insert(cid, Drag { sid: sid.to_string(), x0: cx, y0: cy, d0: (p.dx, p.dy), s0: size, resize: ctrl || corner });
+        self.popup_drags.insert(cid, Drag { sid: sid.to_string(), x0: cx, y0: cy, d0: self.real_offset(&p), s0: size, resize: ctrl || corner });
         self.popup_below.remove(sid);
         self.dirty = true;
         true
