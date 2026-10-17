@@ -11,30 +11,41 @@ tmux, with the same sessions and keys.
 ## Simple first, more when wanted
 
 Out of the box zeit is **as simple as tmux**: a prefix, splits, windows,
-detach and attach, one quiet status line. Nothing new to learn.
+detach and attach, one quiet status line. Nothing new to learn, no config
+needed (your tmux.conf keys are read as they are).
 
-Everything friendlier is **one setting away**, as a style, and every part of
-a style can be switched on its own:
+Everything more is configured **in Lua, like Neovim**: `~/.config/zeit/init.lua`.
+Each feature is a module you `require` and `setup` with its options; what
+you do not require does not exist (no cost, no keys taken). Plugins are
+modules too, so a feature of zeit and a plugin look the same.
 
-```toml
-# ~/.config/zeit/zeit.toml
-style = "plain"      # like tmux (default)
-# style = "friendly" # like zellij: modes with a hint bar, pane frames with
-#                    # names, floating and stacked panes, the welcome screen,
-#                    # swap layouts, mouse everywhere
-# style = "zeit"     # friendly + the timeline UI, the palette, layouts by
-#                    # what runs, quiet notices
+```lua
+-- ~/.config/zeit/init.lua
+local z = require('zeit')
+z.prefix('C-Space')                 -- or keep tmux.conf's
 
-# or pick parts:
-[ui]
-hint_bar = true
-frames = true
-floating = true
-welcome = false
+require('zeit.hintbar').setup()     -- modes with a bar showing the keys
+require('zeit.frames').setup { names = true, rounded = true }
+require('zeit.floating').setup {
+  radius = 14, shadow = true, blur = 10,
+  popout = { 'htop', 'lazygit' },   -- these always open as their own windows
+  overlay = { key = 'M-`', edge = 'top' },  -- a drop-down over every app
+}
+require('zeit.welcome').setup()     -- the session manager at start
+require('zeit.timeline').setup { keep = '30d', scrub = 'C-t' }
+require('zeit.palette').setup { key = 'C-Space Space' }
+
+z.on('pane_exit', function(p) if p.status ~= 0 then z.notify(p.title .. ' failed') end end)
+z.map('n', '<prefix>g', function() z.float { cmd = 'lazygit', popout = true } end)
 ```
 
-The timeline is always recorded (it costs little), but its UI only shows up
-when asked for, so the plain style stays plain.
+- Modules have defaults, so `setup()` with nothing works; every option can be
+  changed later and reloads live.
+- `:checkhealth`-style `zeit doctor` shows which modules are on, what they
+  cost (memory, wakeups) and any errors in init.lua.
+- Plugins come from a folder or a git URL, pinned in a lockfile (as zett's).
+- The timeline is recorded whenever `zeit.timeline` is required; nothing of
+  it exists otherwise.
 
 ## zeit's own idea: time
 
@@ -93,7 +104,7 @@ keys under a prefix, scripting) and fixes the rest:
 | Features of the outer terminal | lost unless passed through | **kept**: images, popups, smooth scroll, marks, the zash UI protocol |
 | Survives | closing the terminal | closing the terminal, logout, **reboot** (layouts, folders, commands, scrollback restored) |
 | Copy mode | its own key tables | zett-edit: Vim exactly as Neovim does it, `/` search, yank to the clipboard |
-| Config | its own language | `zeit.toml` + **your tmux.conf keys read as they are** + Lua |
+| Config | its own language | **Lua like Neovim** (`init.lua`, a module per feature) + your tmux.conf keys read as they are |
 | Remote | ssh, then tmux on the far side, drawn as text | `zeit attach host`: the remote session drawn **natively** by zash |
 | Overview | `choose-tree` text list | a dashboard with live previews of every pane |
 
@@ -183,7 +194,7 @@ zash window and a pane in a zeit session behave the same.
   branch, CPU and memory (from Vitals); type to filter; Enter to attach.
 - **Projects.** `zeit p [folder]` opens the session for a project (made from
   a template the first time: windows, splits, commands, like tmuxinator but in
-  TOML); zett opens a project's session next to its files.
+  Lua or a plain table); zett opens a project's session next to its files.
 - **Long commands tell you.** Shell marks know when a command ends; one in a
   background pane that ran longer than a minute sends a desktop notification
   (or a quiet mark in the status line), with its exit status.
@@ -235,7 +246,7 @@ The things that make zellij pleasant to use, on zeit's cheaper core:
   shows recent and running sessions, project folders and a field to name a new
   one; the same manager opens over any session (prefix w): switch, rename,
   kill, restore a dead one.
-- **Layout files.** Sessions described in TOML (windows, panes, sizes,
+- **Layout files.** Sessions described as Lua tables (windows, panes, sizes,
   folders, commands, which pane floats); `zeit --layout dev.toml`; also the
   form saved sessions take, so a session can be saved as a layout.
 - **Plugins in WASM.** Status-bar parts, pickers, a file tree, a git panel,
