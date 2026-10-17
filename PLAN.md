@@ -228,6 +228,13 @@ zash window and a pane in a zeit session behave the same.
   ```
   A bottom pane for builds that closes when they pass and stays (and
   notifies) when they fail, servers as remembered floats, ssh in new tabs.
+  **The command stays visible where it was typed:** a compact line in a
+  smaller font (`▸ cargo build · running 0:12 · in the bottom pane`) that
+  updates itself (`✓ 0:41`, `✗ exit 101` in red) and is a **dropdown**: `▸`
+  unfolds the output right there (live while it runs, errors first), `▾`
+  folds it away; it jumps to the pane it runs in and back, and stays in the
+  scrollback after that pane has closed. (zash draws it natively: a small-font
+  row and a collapsible block; in a plain terminal one dim line.)
 - **Long commands tell you.** Shell marks know when a command ends; one in a
   background pane that ran longer than a minute sends a desktop notification
   (or a quiet mark in the status line), with its exit status.
