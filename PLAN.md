@@ -210,6 +210,22 @@ The things that make zellij pleasant to use, on zeit's cheaper core:
 - **Floating panes.** A pane that floats over the layout (toggle with a key),
   can be moved and resized with the mouse, pinned, or sent back into the
   layout. Scratch shells, a quick `htop`, a running build log.
+- **Floating panes that can leave the terminal.** A floating pane is shown
+  one of three ways, chosen per pane, per command or as a default:
+  1. *inside*: drawn by zash over the layout but looking like a window of its
+     own: rounded corners, a soft shadow, the text behind it blurred, a title
+     bar with its name and buttons (close, back into the layout, pop out);
+  2. *a window*: the pane pops out of zash as a real desktop window that
+     floats over anything (the browser, a game launcher) and can be moved to
+     another workspace or screen; it stays the same pane of the same session,
+     and one key puts it back into the layout;
+  3. *an overlay*: shown above every app on a key and hidden again (a
+     drop-down or scratch terminal), on the screen edge or centre you choose.
+
+  Everything about it is settable: size and place (or remembered per
+  command), corner radius, shadow, blur, opacity, title bar or none, which
+  commands always float (`htop`, a calculator, `lazygit`) and how. In a plain
+  terminal an *inside* float is drawn with box lines.
 - **Stacked panes.** Several panes in one slot, only the active one open, the
   others as one-line title bars; scroll through them. Many terminals in a
   small space.
@@ -282,7 +298,8 @@ boxed list in the grid, a notice a line in the status bar.
   prefix keys from tmux.conf, mouse, the full CLI (`new`, `ls`, `kill`,
   `send-keys`, `capture-pane`, …). Modes with the hint bar.
 - **Z1½ — friendly.** Floating and stacked panes, swap layouts, the welcome
-  screen and session manager, layout files.
+  screen and session manager, layout files; floating panes inside, as their
+  own desktop windows, and as overlays over every app.
 - **Z2 — tmux parity.** Everything in "tmux parity" above: copy mode with
   zett-edit, layouts, swap / break / join, synchronize, popups, hooks,
   choose-tree, buffers, environment updates.
