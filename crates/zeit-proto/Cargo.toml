@@ -1,0 +1,10 @@
+[package]
+name = "zeit-proto"
+description = "zeit's protocol between server, clients and pane holders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true

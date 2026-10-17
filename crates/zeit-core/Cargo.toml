@@ -1,0 +1,13 @@
+[package]
+name = "zeit-core"
+description = "zeit's sessions, panes, layouts, emulation and extensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zeit-proto.workspace = true
+serde.workspace = true
+alacritty_terminal.workspace = true
+mlua.workspace = true
+libc.workspace = true

@@ -235,6 +235,9 @@ zash window and a pane in a zeit session behave the same.
   folds it away; it jumps to the pane it runs in and back, and stays in the
   scrollback after that pane has closed. (zash draws it natively: a small-font
   row and a collapsible block; in a plain terminal one dim line.)
+  The line has **columns**, all in the same small font: the command left,
+  its status right-aligned (`running 0:12 · bottom pane`, `✗ exit 101 · 3:02`),
+  so successive lines read like rows of a table.
 - **Long commands tell you.** Shell marks know when a command ends; one in a
   background pane that ran longer than a minute sends a desktop notification
   (or a quiet mark in the status line), with its exit status.

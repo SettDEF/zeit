@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/zeit-proto", "crates/zeit-core", "crates/zeit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+zeit-proto = { path = "crates/zeit-proto" }
+zeit-core = { path = "crates/zeit-core" }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+alacritty_terminal = "0.26"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

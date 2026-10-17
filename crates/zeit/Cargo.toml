@@ -1,0 +1,16 @@
+[package]
+name = "zeit"
+description = "A terminal multiplexer: your shells keep running, and remember"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zeit"
+path = "src/main.rs"
+
+[dependencies]
+zeit-proto.workspace = true
+zeit-core.workspace = true
+libc.workspace = true
+crossterm = "0.28"
