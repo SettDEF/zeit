@@ -125,3 +125,9 @@ P('M-r', "new-window -n rss -c $HOME \\; send-keys -t rss newsboat Enter")
 P('M-e', "new-window -n email -c $HOME \\; send-keys -t email mutt Enter")
 P('M-c', "new-window -n chat -c $HOME \\; send-keys -t chat weechat-curses Enter \\; " ..
   "split-window -t chat -fh -p 27 \\; send-keys -t chat 'nvim -c \"set nowrap\" ~/.config/redpill/upcoming' Enter")
+
+-- pickers and prompts
+P('W', [[choose-tree -Zw "swap-window -t '%%'"]])
+P('P', [[choose-tree -Zw "swap-pane -t '%%'"]])
+P('C-M-w', [[command-prompt -p "Swap current window to? (e.g. 3)" "swap-window -t '%%'"]])
+P('C-M-p', [[command-prompt -p "Swap current pane to? (e.g. 2)" "swap-pane -t '%%'"]])

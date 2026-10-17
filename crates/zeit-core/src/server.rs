@@ -51,6 +51,22 @@ struct Client {
     rows: u16,
     last: Vec<Vec<Cell>>,
     notice: Option<String>,
+    /// an input line or a picker, over everything; it takes the keys while open
+    overlay: Option<Overlay>,
+}
+
+#[derive(Clone, Debug)]
+enum Overlay {
+    Prompt { label: String, text: String, cur: usize, then: Then },
+    /// (label, target) rows
+    Choose { items: Vec<(String, String)>, sel: usize, template: Option<String> },
+}
+
+#[derive(Clone, Debug)]
+enum Then {
+    /// run the text as a command, or put it into a template (`swap-window -t '%%'`)
+    Command(Option<String>),
+    Search { pane: String, back: bool },
 }
 
 pub struct Server {
@@ -81,6 +97,8 @@ pub struct Server {
     prev_pane: HashMap<String, String>,
     /// panes with output while their window was not shown (monitor-activity)
     activity: HashSet<String>,
+    /// the latest copy-mode search: text, and whether it went up
+    last_search: Option<(String, bool)>,
 }
 
 type Reply = Result<String, String>;
@@ -120,7 +138,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None };
     s.restore();
     loop {
         let Ok(ev) = rx.recv() else { break };
@@ -213,7 +231,7 @@ impl Server {
                         }
                     }
                 });
-                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None });
+                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None });
             }
             Ev::Gone(id) => {
                 self.clients.remove(&id);
@@ -350,6 +368,10 @@ impl Server {
     // ── input: keys to the focused pane, the mouse to the pane under it ──
 
     fn input(&mut self, cid: u64, bytes: &[u8]) {
+        if self.clients.get(&cid).is_some_and(|c| c.overlay.is_some()) {
+            self.overlay_input(cid, bytes);
+            return;
+        }
         // a mouse report split across reads waits for its end
         let mut joined = self.carry.remove(&cid).unwrap_or_default();
         joined.extend_from_slice(bytes);
@@ -616,6 +638,7 @@ impl Server {
         let Some(sid) = c.session.clone() else { return };
         let (cols, rows) = (c.cols, c.rows);
         let notice = c.notice.clone();
+        let overlay = c.overlay.clone();
         let Some(s) = self.session(&sid) else { return };
         let Some(w) = s.windows.get(s.active) else { return };
         let mut grid: Vec<Vec<Cell>> = vec![vec![Cell::default(); cols as usize]; rows as usize];
@@ -707,6 +730,15 @@ impl Server {
             let hr = if self.look.top { rows as usize - 1 } else { status_row - 1 };
             write_text(&mut grid, hr, 0, &" ".repeat(cols as usize), Color::Default, Color::Indexed(0), 0);
             write_text(&mut grid, hr, 1, &hint, Color::Indexed(7), Color::Indexed(0), 0);
+        }
+        if let Some(o) = &overlay {
+            let at = self.draw_overlay(o, &mut grid, status_row, area);
+            if matches!(o, Overlay::Prompt { .. }) {
+                cursor = at;
+                shape = CursorShape::Beam;
+            } else {
+                cursor = None;
+            }
         }
         let title = self.panes.get(&w.focus).map(|p| p.title.lock().unwrap().clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| format!("zeit: {}", s.name));
         let modes = self.panes.get(&w.focus).map(|p| p.modes()).unwrap_or(0);
@@ -1311,6 +1343,8 @@ struct CopyState {
     rect: bool,
     /// `copy-mode -e`: scrolling back to the bottom leaves
     exit_at_bottom: bool,
+    /// the latest search match, shown while nothing is selected
+    hit: Option<((i32, usize), (i32, usize))>,
 }
 
 impl Server {
@@ -1513,7 +1547,7 @@ impl Server {
                         let rows = t.screen_lines() as i32;
                         (c.column.0, c.line.0.clamp(-d, rows - 1 - d))
                     };
-                    self.copy.insert(p.clone(), CopyState { x, y, anchor: None, lines: false, rect: false, exit_at_bottom: flag("-e") });
+                    self.copy.insert(p.clone(), CopyState { x, y, anchor: None, lines: false, rect: false, exit_at_bottom: flag("-e"), hit: None });
                 }
                 if flag("-u") {
                     self.copy_do(cid, &p, "page-up", None);
@@ -1639,6 +1673,33 @@ impl Server {
                 let _ = std::fs::remove_file(paths::server_socket("default"));
                 std::process::exit(0);
             }
+            "command-prompt" => {
+                let cid = cid.ok_or("command-prompt needs an attached client")?;
+                let val = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
+                let (label, init) = (val("-p"), val("-I").unwrap_or_default());
+                let mut skip = false;
+                let mut tpl = None;
+                for a in args {
+                    if skip {
+                        skip = false;
+                    } else if matches!(a.as_str(), "-p" | "-I" | "-t") {
+                        skip = true;
+                    } else if !a.starts_with('-') {
+                        tpl = Some(a.clone());
+                    }
+                }
+                let label = label.map(|l| format!("{} ", l.trim_end_matches(':').trim_end())).unwrap_or_else(|| ": ".into());
+                let cur = init.chars().count();
+                self.open_overlay(cid, Overlay::Prompt { label, text: init, cur, then: Then::Command(tpl) });
+                Ok(String::new())
+            }
+            "choose-tree" | "choose-window" | "choose-session" => {
+                let cid = cid.ok_or("choose-tree needs an attached client")?;
+                let (items, sel) = self.tree_items(flag("-s") || cmd == "choose-session");
+                let template = positional.last().cloned();
+                self.open_overlay(cid, Overlay::Choose { items, sel, template });
+                Ok(String::new())
+            }
             "__keys" => {
                 // for the client: which keys are zeit's, and which repeat
                 let name = |c: &Chord| format!("{}{}{}", if c.ctrl { "C-" } else { "" }, if c.alt { "M-" } else { "" }, c.key);
@@ -1647,7 +1708,7 @@ impl Server {
                 out.extend(self.keys.table.iter().filter(|(_, b)| b.repeat).map(|(c, _)| format!("repeat {}", name(c))));
                 Ok(out.join("\n"))
             }
-            "choose-tree" | "choose-window" | "choose-session" | "command-prompt" | "display-panes" | "display-popup" | "popup" | "select-layout" | "next-layout" | "move-pane" | "join-pane" | "break-pane" => Err(format!("{cmd}: not in zeit yet")),
+            "display-panes" | "display-popup" | "popup" | "select-layout" | "next-layout" | "move-pane" | "join-pane" | "break-pane" => Err(format!("{cmd}: not in zeit yet")),
             other => Err(format!("unknown command {other:?}")),
         }
     }
@@ -1703,8 +1764,18 @@ impl Server {
             (false, "Enter") => "copy-selection-and-cancel",
             (false, "Escape") if selecting => "clear-selection",
             (false, "Escape" | "q") | (true, "c") => "cancel",
-            (false, "/" | "?" | "n" | "N") => {
-                self.notice_all("copy mode search: not in zeit yet".into());
+            (false, k @ ("/" | "?")) => {
+                let back = k == "?";
+                if let Some(cid) = cid {
+                    let label = if back { "(search up) " } else { "(search down) " };
+                    self.open_overlay(cid, Overlay::Prompt { label: label.into(), text: String::new(), cur: 0, then: Then::Search { pane: pane.to_string(), back } });
+                }
+                return;
+            }
+            (false, k @ ("n" | "N")) => {
+                if let Some((text, back)) = self.last_search.clone() {
+                    self.copy_search(pane, &text, back != (k == "N"));
+                }
                 return;
             }
             _ => return,
@@ -1720,6 +1791,9 @@ impl Server {
         let Some(p) = self.panes.get(pane) else { return };
         let Some(mut c) = self.copy.get(pane).copied() else { return };
         let mut copied: Option<String> = None;
+        if what != "refresh" {
+            c.hit = None;
+        }
         let mut cancel = false;
         {
             let mut t = p.term.lock();
@@ -1843,10 +1917,11 @@ impl Server {
                 t.selection = None;
                 t.scroll_display(Scroll::Bottom);
             } else {
-                t.selection = c.anchor.map(|(ay, ax)| {
+                t.selection = c.anchor.or(c.hit.map(|h| h.0)).map(|(ay, ax)| {
+                    let (ey, ex) = if c.anchor.is_none() { c.hit.map(|h| h.1).unwrap_or((c.y, c.x)) } else { (c.y, c.x) };
                     let ty = if c.lines { SelectionType::Lines } else if c.rect { SelectionType::Block } else { SelectionType::Simple };
                     let mut s = Selection::new(ty, Point::new(Line(ay), Column(ax)), Side::Left);
-                    s.update(Point::new(Line(c.y), Column(c.x)), Side::Right);
+                    s.update(Point::new(Line(ey), Column(ex)), Side::Right);
                     s
                 });
             }
@@ -1905,5 +1980,303 @@ impl Server {
         }
         let rx = cols.saturating_sub(right.chars().count());
         write_text(grid, row, rx.max(x), right, l.muted, l.status_bg, 0);
+    }
+}
+
+/// A literal search for alacritty's regex search; lower case finds any case.
+fn search_pattern(text: &str) -> String {
+    let mut out = String::new();
+    if !text.chars().any(|c| c.is_uppercase()) {
+        out.push_str("(?i)");
+    }
+    for c in text.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+impl Server {
+    // ── overlays: the input line and the picker ──
+
+    fn open_overlay(&mut self, cid: u64, o: Overlay) {
+        if let Some(c) = self.clients.get_mut(&cid) {
+            c.overlay = Some(o);
+            c.notice = None;
+        }
+        self.dirty = true;
+    }
+
+    fn overlay_input(&mut self, cid: u64, bytes: &[u8]) {
+        let mut i = 0;
+        while i < bytes.len() {
+            let Some((k, n)) = crate::keys::chord_from_bytes(&bytes[i..]) else { break };
+            i += n;
+            let Some(mut o) = self.clients.get_mut(&cid).and_then(|c| c.overlay.take()) else { return };
+            let mut keep = true;
+            let mut run: Option<Box<dyn FnOnce(&mut Server)>> = None;
+            match &mut o {
+                Overlay::Prompt { text, cur, then, .. } => {
+                    let chars: Vec<char> = text.chars().collect();
+                    match (k.ctrl, k.key.as_str()) {
+                        (false, "Enter") => {
+                            keep = false;
+                            let (t, then) = (text.clone(), then.clone());
+                            run = Some(Box::new(move |s: &mut Server| s.prompt_done(cid, t, then)));
+                        }
+                        (false, "Escape") | (true, "c") | (true, "g") => keep = false,
+                        (false, "Backspace") | (true, "h") => {
+                            if chars.is_empty() {
+                                keep = false;
+                            } else if *cur > 0 {
+                                let mut c = chars;
+                                c.remove(*cur - 1);
+                                *text = c.into_iter().collect();
+                                *cur -= 1;
+                            }
+                        }
+                        (false, "Delete") | (true, "d") if *cur < chars.len() => {
+                            let mut c = chars;
+                            c.remove(*cur);
+                            *text = c.into_iter().collect();
+                        }
+                        (false, "Left") | (true, "b") => *cur = cur.saturating_sub(1),
+                        (false, "Right") | (true, "f") => *cur = (*cur + 1).min(chars.len()),
+                        (false, "Home") | (true, "a") => *cur = 0,
+                        (false, "End") | (true, "e") => *cur = chars.len(),
+                        (true, "u") => {
+                            *text = chars[*cur..].iter().collect();
+                            *cur = 0;
+                        }
+                        (true, "w") => {
+                            let mut start = *cur;
+                            while start > 0 && chars[start - 1] == ' ' {
+                                start -= 1;
+                            }
+                            while start > 0 && chars[start - 1] != ' ' {
+                                start -= 1;
+                            }
+                            *text = chars[..start].iter().chain(chars[*cur..].iter()).collect();
+                            *cur = start;
+                        }
+                        (false, key) if !k.alt && (key.chars().count() == 1 || key == "Space") => {
+                            let ch = if key == "Space" { ' ' } else { key.chars().next().unwrap() };
+                            let mut c = chars;
+                            c.insert(*cur, ch);
+                            *text = c.into_iter().collect();
+                            *cur += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                Overlay::Choose { items, sel, template } => {
+                    let last = items.len().saturating_sub(1);
+                    match (k.ctrl, k.key.as_str()) {
+                        (false, "j" | "Down") | (true, "n") => *sel = (*sel + 1).min(last),
+                        (false, "k" | "Up") | (true, "p") => *sel = sel.saturating_sub(1),
+                        (false, "g" | "Home") => *sel = 0,
+                        (false, "G" | "End") => *sel = last,
+                        (false, "Escape" | "q") | (true, "c") => keep = false,
+                        (false, "x") => {
+                            if let Some((_, t)) = items.get(*sel).cloned() {
+                                keep = false;
+                                run = Some(Box::new(move |s: &mut Server| {
+                                    let cmd = if t.ends_with(':') { format!("kill-session -t {}", t.trim_end_matches(':')) } else { format!("kill-window -t {t}") };
+                                    s.choose_kill(&cmd);
+                                }));
+                            }
+                        }
+                        (false, "Enter") => {
+                            keep = false;
+                            if let Some((_, t)) = items.get(*sel).cloned() {
+                                let tpl = template.clone();
+                                run = Some(Box::new(move |s: &mut Server| s.chosen(cid, &t, tpl)));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(c) = self.clients.get_mut(&cid) {
+                if keep {
+                    c.overlay = Some(o);
+                }
+            }
+            if let Some(f) = run {
+                f(self);
+            }
+            self.dirty = true;
+        }
+    }
+
+    fn prompt_done(&mut self, cid: u64, text: String, then: Then) {
+        match then {
+            Then::Command(tpl) => {
+                let line = match tpl {
+                    Some(t) => t.replace("%%", &text).replace("%1", &text),
+                    None => text,
+                };
+                if line.trim().is_empty() {
+                    return;
+                }
+                match self.run_line(Some(cid), None, &line) {
+                    Ok(out) if !out.is_empty() => self.notice_all(out.lines().next().unwrap_or("").to_string()),
+                    Ok(_) => {}
+                    Err(e) => self.notice_all(e),
+                }
+            }
+            Then::Search { pane, back } => {
+                if !text.is_empty() {
+                    self.last_search = Some((text.clone(), back));
+                    self.copy_search(&pane, &text, back);
+                }
+            }
+        }
+    }
+
+    /// The next match from the copy cursor, wrapping around; true when found.
+    fn copy_search(&mut self, pane: &str, text: &str, back: bool) -> bool {
+        use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
+        use alacritty_terminal::term::search::RegexSearch;
+        let Some(p) = self.panes.get(pane) else { return false };
+        let Some(mut c) = self.copy.get(pane).copied() else { return false };
+        let Ok(mut re) = RegexSearch::new(&search_pattern(text)) else { return false };
+        let found = {
+            let t = p.term.lock();
+            let cols = t.columns();
+            let hist = t.grid().history_size() as i32;
+            let rows = t.screen_lines() as i32;
+            // one cell on, so the same match is not found again
+            let (y, x) = if back {
+                if c.x > 0 { (c.y, c.x - 1) } else if c.y > -hist { (c.y - 1, cols - 1) } else { (rows - 1, cols - 1) }
+            } else if c.x + 1 < cols {
+                (c.y, c.x + 1)
+            } else if c.y < rows - 1 {
+                (c.y + 1, 0)
+            } else {
+                (-hist, 0)
+            };
+            let dir = if back { Direction::Left } else { Direction::Right };
+            t.search_next(&mut re, Point::new(Line(y), Column(x)), dir, Side::Left, None)
+        };
+        let Some(m) = found else {
+            self.notice_all(format!("not found: {text}"));
+            return false;
+        };
+        let (s, e) = (m.start(), m.end());
+        c.y = s.line.0;
+        c.x = s.column.0;
+        c.hit = Some(((s.line.0, s.column.0), (e.line.0, e.column.0)));
+        self.copy.insert(pane.to_string(), c);
+        self.copy_do(None, pane, "refresh", None);
+        true
+    }
+
+    /// The picker's choice: into the template, or go there.
+    fn chosen(&mut self, cid: u64, target: &str, template: Option<String>) {
+        if let Some(t) = template {
+            if let Err(e) = self.run_line(Some(cid), None, &t.replace("%%", target)) {
+                self.notice_all(e);
+            }
+            return;
+        }
+        let (name, idx) = target.split_once(':').unwrap_or((target, ""));
+        let Some(sid) = self.find_session(name) else { return };
+        if let Some(c) = self.clients.get_mut(&cid) {
+            c.session = Some(sid.clone());
+            c.last.clear();
+        }
+        if let (Ok(i), Some(s)) = (idx.parse::<usize>(), self.session_mut(&sid)) {
+            if i < s.windows.len() && i != s.active {
+                s.last = s.active;
+                s.active = i;
+            }
+        }
+        self.layout_all();
+    }
+
+    fn choose_kill(&mut self, cmd: &str) {
+        if let Err(e) = self.run_line(None, None, cmd) {
+            self.notice_all(e);
+        }
+    }
+
+    /// choose-tree's rows: every session, and its windows under it.
+    fn tree_items(&self, sessions_only: bool) -> (Vec<(String, String)>, usize) {
+        let mut items = Vec::new();
+        let mut sel = 0;
+        let here = self.clients.values().find_map(|c| c.session.clone());
+        for s in &self.sessions {
+            let attached = self.clients.values().filter(|c| c.session.as_deref() == Some(&s.id)).count();
+            if here.as_deref() == Some(&s.id) && sessions_only {
+                sel = items.len();
+            }
+            items.push((format!("{}  {} windows{}", s.name, s.windows.len(), if attached > 0 { "  (attached)" } else { "" }), format!("{}:", s.name)));
+            if sessions_only {
+                continue;
+            }
+            for (i, w) in s.windows.iter().enumerate() {
+                if here.as_deref() == Some(&s.id) && i == s.active {
+                    sel = items.len();
+                }
+                let panes = w.layout.ids().len();
+                items.push((format!("  {i}: {}{}", self.window_title(w), if panes > 1 { format!("  ({panes} panes)") } else { String::new() }), format!("{}:{i}", s.name)));
+            }
+        }
+        (items, sel)
+    }
+
+    /// The overlay over the screen: the input line on the status row, the picker in a box.
+    fn draw_overlay(&self, o: &Overlay, grid: &mut [Vec<Cell>], status_row: usize, area: Rect) -> Option<(u16, u16)> {
+        let l = &self.look;
+        let cols = grid.first().map(|r| r.len()).unwrap_or(0);
+        match o {
+            Overlay::Prompt { label, text, cur, .. } => {
+                write_text(grid, status_row, 0, &" ".repeat(cols), l.status_fg, l.status_bg, 0);
+                write_text(grid, status_row, 0, "\u{e0b6}", l.primary, l.status_bg, 0);
+                write_text(grid, status_row, 1, label, l.on_primary, l.primary, zeit_proto::BOLD);
+                let n = label.chars().count();
+                write_text(grid, status_row, 1 + n, "\u{e0b4}", l.primary, l.status_bg, 0);
+                let start = 3 + n;
+                // a long line scrolls so the cursor stays visible
+                let room = cols.saturating_sub(start + 1).max(1);
+                let skip = cur.saturating_sub(room - 1);
+                let shown: String = text.chars().skip(skip).take(room).collect();
+                write_text(grid, status_row, start, &shown, Color::Default, l.status_bg, 0);
+                Some(((start + cur - skip) as u16, status_row as u16))
+            }
+            Overlay::Choose { items, sel, .. } => {
+                let w = (items.iter().map(|(t, _)| t.chars().count()).max().unwrap_or(10) + 6).clamp(24, (area.w as usize).saturating_sub(4).max(24));
+                let h = (items.len() + 2).min((area.h as usize).saturating_sub(2).max(3));
+                let x0 = area.x as usize + (area.w as usize).saturating_sub(w) / 2;
+                let y0 = area.y as usize + (area.h as usize).saturating_sub(h) / 2;
+                let inner = h - 2;
+                let top = sel.saturating_sub(inner.saturating_sub(1));
+                let b = l.active_border;
+                write_text(grid, y0, x0, &format!("╭{}╮", "─".repeat(w - 2)), b, Color::Default, 0);
+                write_text(grid, y0, x0 + 2, " choose ", b, Color::Default, zeit_proto::BOLD);
+                for r in 0..inner {
+                    let y = y0 + 1 + r;
+                    write_text(grid, y, x0, &format!("│{}│", " ".repeat(w - 2)), b, Color::Default, 0);
+                    if let Some((label, _)) = items.get(top + r) {
+                        let text: String = format!(" {label}").chars().take(w - 3).collect();
+                        let pad = format!("{text:<width$}", width = w - 2);
+                        if top + r == *sel {
+                            write_text(grid, y, x0 + 1, &pad, l.on_primary, l.primary, zeit_proto::BOLD);
+                        } else {
+                            write_text(grid, y, x0 + 1, &pad, Color::Default, Color::Default, 0);
+                        }
+                    }
+                }
+                write_text(grid, y0 + h - 1, x0, &format!("╰{}╯", "─".repeat(w - 2)), b, Color::Default, 0);
+                let hint = " enter go · x kill · q close ";
+                if w > hint.chars().count() + 4 {
+                    write_text(grid, y0 + h - 1, x0 + w - 2 - hint.chars().count(), hint, l.muted, Color::Default, 0);
+                }
+                None
+            }
+        }
     }
 }

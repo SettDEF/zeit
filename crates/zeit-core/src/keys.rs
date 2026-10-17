@@ -187,6 +187,9 @@ impl Keys {
             "bind l last-window",
             "bind [ copy-mode",
             "bind ] paste-buffer",
+            "bind : command-prompt",
+            "bind s choose-tree -s",
+            "bind w choose-tree -w",
         ] {
             k.line(line);
         }
