@@ -80,3 +80,14 @@ mod tests {
         assert_eq!(when(now_ms()).len(), 5, "today is just the time");
     }
 }
+
+/// Every pane's entries together, newest first (closed panes too): the day at a glance.
+pub fn load_all(max: usize) -> Vec<Entry> {
+    let dir = crate::paths::state_dir().join("history");
+    let mut all: Vec<Entry> = std::fs::read_dir(&dir)
+        .map(|r| r.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".jsonl")).map(|p| load(p, max))).flatten().collect())
+        .unwrap_or_default();
+    all.sort_by(|a, b| b.t.cmp(&a.t));
+    all.truncate(max);
+    all
+}

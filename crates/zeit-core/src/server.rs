@@ -1931,6 +1931,14 @@ impl Server {
             "timeline" | "history" => {
                 let cid = cid.ok_or("timeline needs an attached client")?;
                 let p = target.or(ctx).ok_or("no pane")?;
+                if flag("-a") {
+                    let items = crate::history::load_all(500);
+                    if items.is_empty() {
+                        return Err("nothing ran yet".into());
+                    }
+                    self.open_overlay(cid, Overlay::Timeline { pane: p, items, sel: 0, view: None });
+                    return Ok(String::new());
+                }
                 self.open_timeline(cid, &p)?;
                 Ok(String::new())
             }

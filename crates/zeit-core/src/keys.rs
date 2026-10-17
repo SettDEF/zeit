@@ -193,6 +193,7 @@ impl Keys {
             "bind Space next-layout",
             "bind q display-panes",
             "bind T timeline",
+            "bind A timeline -a",
             "bind M-1 select-layout even-horizontal",
             "bind M-2 select-layout even-vertical",
             "bind M-3 select-layout main-horizontal",
