@@ -8,6 +8,34 @@ nothing is parsed or drawn twice, popups and smooth scrolling keep working,
 and it costs next to nothing. In any other terminal `zeit attach` works like
 tmux, with the same sessions and keys.
 
+## Simple first, more when wanted
+
+Out of the box zeit is **as simple as tmux**: a prefix, splits, windows,
+detach and attach, one quiet status line. Nothing new to learn.
+
+Everything friendlier is **one setting away**, as a style, and every part of
+a style can be switched on its own:
+
+```toml
+# ~/.config/zeit/zeit.toml
+style = "plain"      # like tmux (default)
+# style = "friendly" # like zellij: modes with a hint bar, pane frames with
+#                    # names, floating and stacked panes, the welcome screen,
+#                    # swap layouts, mouse everywhere
+# style = "zeit"     # friendly + the timeline UI, the palette, layouts by
+#                    # what runs, quiet notices
+
+# or pick parts:
+[ui]
+hint_bar = true
+frames = true
+floating = true
+welcome = false
+```
+
+The timeline is always recorded (it costs little), but its UI only shows up
+when asked for, so the plain style stays plain.
+
 ## zeit's own idea: time
 
 tmux and zellij are the bar for what must work; they are not the model.
