@@ -192,6 +192,7 @@ impl Keys {
             "bind w choose-tree -w",
             "bind Space next-layout",
             "bind q display-panes",
+            "bind T timeline",
             "bind M-1 select-layout even-horizontal",
             "bind M-2 select-layout even-vertical",
             "bind M-3 select-layout main-horizontal",

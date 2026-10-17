@@ -21,6 +21,8 @@ pub enum PaneEvent {
     Passthrough(String, Vec<u8>),
     /// a shell mark (OSC 133: A prompt, C output starts, D done) and the line it came at
     Mark { pane: String, kind: char, exit: Option<i32>, line: i64 },
+    /// the command line the shell is about to run (OSC 7733;cmd;TEXT)
+    Cmd { pane: String, text: String },
     /// the shell printed a job's line (OSC 7733;job;ID) here
     JobLine { pane: String, job: String, line: i64 },
     Exited(String, i32),
@@ -293,6 +295,7 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
                     let _ = events.send(match what {
                         Place::Mark(kind, exit) => PaneEvent::Mark { pane: id.clone(), kind, exit, line },
                         Place::Job(job) => PaneEvent::JobLine { pane: id.clone(), job, line },
+                        Place::Cmd(text) => PaneEvent::Cmd { pane: id.clone(), text },
                     });
                 }
                 parser.advance(&mut *term.lock(), &bytes[last..]);
@@ -326,7 +329,7 @@ fn passthrough(chunk: &[u8]) -> Vec<Vec<u8>> {
         let start = i + p;
         let Some(end) = chunk[start..].iter().position(|&b| b == 0x07).map(|e| start + e + 1) else { break };
         // popups only: Neovim mode (7733;nvim) belongs to the pane, not to the outer window
-        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") {
+        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") && !chunk[start..end].starts_with(b"\x1b]7733;cmd;") {
             out.push(chunk[start..end].to_vec());
         }
         i = end;
@@ -337,6 +340,7 @@ fn passthrough(chunk: &[u8]) -> Vec<Vec<u8>> {
 enum Place {
     Mark(char, Option<i32>),
     Job(String),
+    Cmd(String),
 }
 
 /// Where in a chunk the shell marks (OSC 133) and job lines (OSC 7733;job;ID) end.
@@ -356,6 +360,8 @@ fn places(chunk: &[u8]) -> Vec<(usize, Place)> {
             }
         } else if let Some(job) = body.strip_prefix("7733;job;") {
             out.push((end.min(chunk.len()), Place::Job(job.to_string())));
+        } else if let Some(cmd) = body.strip_prefix("7733;cmd;") {
+            out.push((end.min(chunk.len()), Place::Cmd(cmd.to_string())));
         }
         i = end.min(chunk.len());
     }

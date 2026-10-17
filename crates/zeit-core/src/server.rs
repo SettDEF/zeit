@@ -66,6 +66,8 @@ enum Overlay {
     Choose { items: Vec<(String, String)>, sel: usize, template: Option<String> },
     /// display-panes: each pane's number, a digit picks one
     Panes,
+    /// a pane's timeline: its commands, newest first; `view` scrolls one's output
+    Timeline { pane: String, items: Vec<crate::history::Entry>, sel: usize, view: Option<usize> },
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +109,10 @@ pub struct Server {
     last_search: Option<(String, bool)>,
     /// which preset layout a window is on (for next-layout), by its panes
     layout_at: HashMap<String, usize>,
+    /// the command each pane runs right now (from the shell's OSC 7733;cmd)
+    running: HashMap<String, Running>,
+    /// what each pane ran, recently (the file keeps more)
+    histories: HashMap<String, std::collections::VecDeque<crate::history::Entry>>,
     /// commands z.rule sent to another pane
     jobs: Vec<Job>,
     ticking: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -149,7 +155,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), jobs: Vec::new(), ticking: Default::default() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -274,7 +280,14 @@ impl Server {
                 }
                 self.dirty = true;
             }
-            Ev::Pane(PaneEvent::Mark { pane, kind, exit, line }) => self.job_mark(&pane, kind, exit, line),
+            Ev::Pane(PaneEvent::Mark { pane, kind, exit, line }) => {
+                self.history_mark(&pane, kind, exit, line);
+                self.job_mark(&pane, kind, exit, line);
+            }
+            Ev::Pane(PaneEvent::Cmd { pane, text }) => {
+                let cwd = self.panes.get(&pane).map(|p| p.cwd().display().to_string()).unwrap_or_default();
+                self.running.insert(pane, Running { cmd: text, cwd, start: None, t: crate::history::now_ms(), at: std::time::Instant::now() });
+            }
             Ev::Pane(PaneEvent::JobLine { pane: _, job, line }) => {
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == job) {
                     j.line = Some(line);
@@ -1915,6 +1928,12 @@ impl Server {
                 self.notice_all(format!("layout: {name}"));
                 Ok(String::new())
             }
+            "timeline" | "history" => {
+                let cid = cid.ok_or("timeline needs an attached client")?;
+                let p = target.or(ctx).ok_or("no pane")?;
+                self.open_timeline(cid, &p)?;
+                Ok(String::new())
+            }
             "display-panes" | "displayp" => {
                 let cid = cid.ok_or("display-panes needs an attached client")?;
                 self.open_overlay(cid, Overlay::Panes);
@@ -2238,6 +2257,10 @@ impl Server {
             let mut keep = true;
             let mut run: Option<Box<dyn FnOnce(&mut Server)>> = None;
             match &mut o {
+                Overlay::Timeline { pane, items, sel, view } => {
+                    let (pane, items_c) = (pane.clone(), items.clone());
+                    keep = self.timeline_key(cid, &k, &pane, &items_c, sel, view);
+                }
                 Overlay::Panes => {
                     keep = false;
                     if let Some(n) = k.key.chars().next().and_then(|c| c.to_digit(10)).filter(|_| k.key.chars().count() == 1 && !k.ctrl) {
@@ -2467,6 +2490,10 @@ impl Server {
         let l = &self.look;
         let cols = grid.first().map(|r| r.len()).unwrap_or(0);
         match o {
+            Overlay::Timeline { items, sel, view, .. } => {
+                self.draw_timeline(grid, area, items, *sel, *view);
+                None
+            }
             Overlay::Panes => None,
             Overlay::Prompt { label, text, cur, .. } => {
                 write_text(grid, status_row, 0, &" ".repeat(cols), l.status_fg, l.status_bg, 0);
@@ -3052,6 +3079,166 @@ impl Server {
         let tmp = path.with_extension("tmp");
         if std::fs::write(&tmp, format!("[{}]\n", items.join(","))).is_ok() {
             let _ = std::fs::rename(tmp, path);
+        }
+    }
+}
+
+/// A command a pane is running (between the shell's C and D marks).
+#[derive(Clone, Debug)]
+struct Running {
+    cmd: String,
+    cwd: String,
+    /// where its output starts (abs line), once the C mark came
+    start: Option<i64>,
+    t: u64,
+    at: std::time::Instant,
+}
+
+impl Server {
+    /// Shell marks: a command's output starts (C) or it ended (D): then it joins the history.
+    fn history_mark(&mut self, pane: &str, kind: char, exit: Option<i32>, line: i64) {
+        match kind {
+            'C' => {
+                if let Some(r) = self.running.get_mut(pane) {
+                    r.start = Some(line);
+                }
+            }
+            'D' => {
+                let Some(r) = self.running.remove(pane) else { return };
+                let Some(start) = r.start else { return };
+                let mut out = self.panes.get(pane).map(|p| p.rows_text(start, line)).unwrap_or_default();
+                while out.last().is_some_and(|l| l.is_empty()) {
+                    out.pop();
+                }
+                let skip = out.len().saturating_sub(crate::history::KEEP_LINES);
+                let out = out.split_off(skip);
+                let e = crate::history::Entry { t: r.t, cmd: r.cmd, cwd: r.cwd, exit: exit.unwrap_or(0), secs: r.at.elapsed().as_secs_f64(), out };
+                // loaded before the new one is written, or it would count twice
+                let h = self.histories.entry(pane.to_string()).or_insert_with(|| crate::history::load(pane, 500));
+                crate::history::append(pane, &e);
+                h.push_back(e);
+                while h.len() > 500 {
+                    h.pop_front();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn open_timeline(&mut self, cid: u64, pane: &str) -> Result<(), String> {
+        let h = self.histories.entry(pane.to_string()).or_insert_with(|| crate::history::load(pane, 500));
+        if h.is_empty() {
+            return Err("nothing ran in this pane yet".into());
+        }
+        let items: Vec<crate::history::Entry> = h.iter().rev().cloned().collect();
+        self.open_overlay(cid, Overlay::Timeline { pane: pane.to_string(), items, sel: 0, view: None });
+        Ok(())
+    }
+
+    /// A key in the timeline: move, show the output, rerun, insert, copy.
+    fn timeline_key(&mut self, cid: u64, k: &Chord, pane: &str, items: &[crate::history::Entry], sel: &mut usize, view: &mut Option<usize>) -> bool {
+        let n = items.len();
+        let e = &items[(*sel).min(n.saturating_sub(1))];
+        let page = (self.size.1 as usize / 2).max(1);
+        match (view.is_some(), k.ctrl, k.key.as_str()) {
+            (false, false, "j" | "Down") => *sel = (*sel + 1).min(n.saturating_sub(1)),
+            (false, false, "k" | "Up") => *sel = sel.saturating_sub(1),
+            (false, false, "g" | "Home") => *sel = 0,
+            (false, false, "G" | "End") => *sel = n.saturating_sub(1),
+            (false, false, "Enter" | "l" | "o") => *view = Some(e.out.len().saturating_sub(page)),
+            (true, false, "j" | "Down") => *view = Some((view.unwrap() + 1).min(e.out.len().saturating_sub(1))),
+            (true, false, "k" | "Up") => *view = Some(view.unwrap().saturating_sub(1)),
+            (true, true, "d") | (true, false, "PageDown" | "Space") => *view = Some((view.unwrap() + page).min(e.out.len().saturating_sub(1))),
+            (true, true, "u") | (true, false, "PageUp") => *view = Some(view.unwrap().saturating_sub(page)),
+            (true, false, "g") => *view = Some(0),
+            (true, false, "G") => *view = Some(e.out.len().saturating_sub(page)),
+            (true, false, "q" | "Escape" | "h") => *view = None,
+            (_, false, "r") => {
+                // again, in a pane below, where it ran
+                let cmd = e.cmd.clone();
+                let _ = self.command(Some(cid), vec!["split-window".into(), "-v".into(), "-c".into(), e.cwd.clone()]);
+                if let Some(p) = self.client_pane(cid).and_then(|p| self.panes.get(&p)) {
+                    p.input(format!("{cmd}\r").as_bytes());
+                }
+                return false;
+            }
+            (_, false, "i") => {
+                if let Some(p) = self.panes.get(pane) {
+                    p.input(e.cmd.as_bytes());
+                }
+                return false;
+            }
+            (_, false, "y") => {
+                let text = e.out.join("\n");
+                self.buffers.insert(0, text.clone());
+                std::thread::spawn(move || {
+                    use std::io::Write;
+                    if let Ok(mut c) = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+                        if let Some(mut i) = c.stdin.take() {
+                            let _ = i.write_all(text.as_bytes());
+                        }
+                        let _ = c.wait();
+                    }
+                });
+                self.notice_all(format!("copied {} lines", e.out.len()));
+            }
+            (false, false, "q" | "Escape") | (_, true, "c") => return false,
+            _ => {}
+        }
+        true
+    }
+
+    fn draw_timeline(&self, grid: &mut [Vec<Cell>], area: Rect, items: &[crate::history::Entry], sel: usize, view: Option<usize>) {
+        let l = &self.look;
+        let w = (area.w as usize).saturating_sub(4).max(30);
+        let h = (area.h as usize).saturating_sub(2).max(5);
+        let x0 = area.x as usize + 2;
+        let y0 = area.y as usize + 1;
+        let b = l.active_border;
+        let blank = " ".repeat(w - 2);
+        write_text(grid, y0, x0, &format!("╭{}╮", "─".repeat(w - 2)), b, Color::Default, 0);
+        for r in 1..h - 1 {
+            write_text(grid, y0 + r, x0, &format!("│{blank}│"), b, Color::Default, 0);
+        }
+        write_text(grid, y0 + h - 1, x0, &format!("╰{}╯", "─".repeat(w - 2)), b, Color::Default, 0);
+        let inner = h - 2;
+        let tone = |e: &crate::history::Entry| if e.exit == 0 { Color::Indexed(2) } else { Color::Indexed(1) };
+        let dur = |s: f64| if s < 60.0 { format!("{s:.1}s") } else { format!("{}m{:02}s", s as u64 / 60, s as u64 % 60) };
+        match view {
+            None => {
+                write_text(grid, y0, x0 + 2, " timeline ", b, Color::Default, zeit_proto::BOLD);
+                let hint = " enter output · r rerun · i insert · y copy · q close ";
+                write_text(grid, y0 + h - 1, x0 + w.saturating_sub(hint.chars().count() + 2), hint, l.muted, Color::Default, 0);
+                let top = sel.saturating_sub(inner.saturating_sub(1));
+                for (row, (i, e)) in items.iter().enumerate().skip(top).take(inner).enumerate() {
+                    let y = y0 + 1 + row;
+                    let mark = if e.exit == 0 { "✓".to_string() } else { format!("✗ {}", e.exit) };
+                    let left = format!(" {:<9} ", crate::history::when(e.t));
+                    let right = format!(" {mark:<6} {:>7} ", dur(e.secs));
+                    let room = (w - 2).saturating_sub(left.chars().count() + right.chars().count());
+                    let cmd: String = e.cmd.lines().next().unwrap_or("").chars().take(room).collect();
+                    let (fg, bg, fl) = if i == sel { (l.on_primary, l.primary, zeit_proto::BOLD) } else { (Color::Default, Color::Default, 0) };
+                    write_text(grid, y, x0 + 1, &format!("{left}{cmd:<room$}{right}"), fg, bg, fl);
+                    if i != sel {
+                        write_text(grid, y, x0 + 1, &left, l.muted, Color::Default, 0);
+                        write_text(grid, y, x0 + 1 + left.chars().count() + room, &right, tone(e), Color::Default, 0);
+                    }
+                }
+            }
+            Some(top) => {
+                let e = &items[sel.min(items.len() - 1)];
+                let head: String = format!(" {} ", e.cmd.lines().next().unwrap_or("")).chars().take(w - 6).collect();
+                write_text(grid, y0, x0 + 2, &head, b, Color::Default, zeit_proto::BOLD);
+                let mark = format!(" {} · {} · {} · {} lines · y copy · q back ", if e.exit == 0 { "✓".to_string() } else { format!("✗ {}", e.exit) }, dur(e.secs), crate::history::when(e.t), e.out.len());
+                write_text(grid, y0 + h - 1, x0 + w.saturating_sub(mark.chars().count() + 2), &mark, tone(e), Color::Default, 0);
+                for (row, line) in e.out.iter().skip(top).take(inner).enumerate() {
+                    let t: String = line.chars().take(w - 3).collect();
+                    write_text(grid, y0 + 1 + row, x0 + 2, &t, Color::Default, Color::Default, 0);
+                }
+                if e.out.is_empty() {
+                    write_text(grid, y0 + 1, x0 + 2, "(it printed nothing)", l.muted, Color::Default, 0);
+                }
+            }
         }
     }
 }

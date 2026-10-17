@@ -25,7 +25,10 @@ A terminal multiplexer: your shells keep running, and remember.
   Enter hand-off); your ZDOTDIR and rc files are left as they are.
 - **Upgrades without losing anything:** `zeit restart-server` starts the new
   binary; shells keep running and attached windows reconnect.
-- **A timeline** of every pane's commands, recorded from the start.
+- **A timeline per pane:** every command it ran, with its folder, time, duration,
+  exit status and output (the last 300 lines), kept across restarts. Prefix `T`
+  opens it: Enter shows a command's output again, `r` reruns it in a pane below,
+  `i` types it back into the shell, `y` copies the output.
 
 ```sh
 zeit                        # the session of this folder

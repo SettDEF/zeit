@@ -1,6 +1,7 @@
 //! zeit's core: holders, sessions, panes, layouts, emulation, extensions.
 
 pub mod ext;
+pub mod history;
 pub mod holder;
 pub mod keys;
 pub mod layout;

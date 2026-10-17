@@ -14,7 +14,13 @@ if [[ -o interactive ]]; then
     _zeit_ran=0
     print -n "\e]133;A\a"
   }
-  _zeit_preexec() { _zeit_ran=1; print -n "\e]133;C\a" }
+  # the command line goes along (OSC 7733;cmd), so zeit's timeline knows what ran
+  _zeit_preexec() {
+    _zeit_ran=1
+    local c=${1//$'\a'/}
+    c=${c//$'\e'/}
+    print -rn -- $'\e]7733;cmd;'"${c[1,4000]}"$'\a\e]133;C\a'
+  }
 
   # Enter: when a rule sends the command elsewhere, this shell keeps one line for it
   _zeit_accept() {
