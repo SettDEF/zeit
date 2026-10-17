@@ -28,6 +28,12 @@ Your shells keep running, and remember: a terminal multiplexer with tmux's keys.
   `select-layout` <name>     even-horizontal, even-vertical, main-*, tiled
   `web` [`-h`|`-v`] <address>    a pane that is a web page (drawn by zash)
 
+**Popups** (panes floating over the layout; they run while hidden):
+  `popup` [`-n` <name>] [`-w` %] [`-h` %] [<command>]   a new one (output stays when it ends)
+  `popup-toggle` [`-n` <name>] [<command>]   show or hide (made the first time)   prefix `f`
+  `popup-list`   choose one   prefix `F`      `popup-layer` [up|down]   keys to it or below   prefix `Tab`
+  `popup-move` `-U`|`-D`|`-L`|`-R` [n] | `-c`     `popup-next`   `popup-hide`   `popup-close`
+
 **Jobs and history:**
   `timeline` [`-a`]            what this pane ran (-a: every pane)
   `jobs`, `job-run` [`-c` <dir>] `--` <command>   commands sent to other panes

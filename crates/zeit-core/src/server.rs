@@ -10,6 +10,8 @@ use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::net::{UnixListener, UnixStream};
+
+mod popup;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use zeit_proto::{read_msg, write_msg, Cell, ClientMsg, Color, CursorShape, Frame, ServerMsg, VERSION};
@@ -120,6 +122,11 @@ pub struct Server {
     /// what each pane ran, recently (the file keeps more)
     histories: HashMap<String, std::collections::VecDeque<crate::history::Entry>>,
     /// commands z.rule sent to another pane
+    /// popups per session (floating panes), and the one each session shows
+    popups: HashMap<String, Vec<popup::Popup>>,
+    popup_shown: HashMap<String, String>,
+    /// sessions whose panes have the keyboard while their popup stays in view (the layer below)
+    popup_below: HashSet<String>,
     jobs: Vec<Job>,
     ticking: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -161,7 +168,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -173,6 +180,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     }
     s.rules_flag();
     s.restore();
+    s.restore_popups();
     loop {
         let Ok(ev) = rx.recv() else { break };
         s.handle(ev);
@@ -518,8 +526,36 @@ impl Server {
         let Some(w) = s.windows.get(s.active) else { return };
         let (cx, cy) = (x.saturating_sub(1), y.saturating_sub(1));
         let placed = if w.zoom { vec![(w.focus.clone(), area)] } else { w.layout.place(area).0 };
+        let window_focus = w.focus.clone();
+        // a shown popup: clicks inside are its program's, a click outside hides it
+        let popup = self.shown_popup(&sid).cloned();
+        let (placed, in_popup) = match &popup {
+            Some(p) => {
+                let (outer, inner) = self.popup_rect(p);
+                let inside = |r: Rect| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h;
+                if inside(inner) {
+                    // a click on the popup: up to it
+                    if self.popup_below.remove(&sid) {
+                        self.dirty = true;
+                    }
+                    (vec![(p.pane.clone(), inner)], true)
+                } else if inside(outer) {
+                    return;
+                } else if self.popup_below.contains(&sid) {
+                    (placed, false)
+                } else {
+                    // a click beside the popup: down to the panes (the popup stays in view)
+                    if press && b & 96 == 0 {
+                        self.popup_below.insert(sid.clone());
+                        self.dirty = true;
+                    }
+                    return;
+                }
+            }
+            None => (placed, false),
+        };
         let Some((pane, r)) = placed.into_iter().find(|(_, r)| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h) else { return };
-        let focus = w.focus.clone();
+        let focus = if in_popup { pane.clone() } else { window_focus };
         let wheel = b & 64 != 0;
         let motion = b & 32 != 0;
         // a click on a job's line unfolds it
@@ -591,6 +627,10 @@ impl Server {
 
     fn client_pane(&self, cid: u64) -> Option<String> {
         let s = self.session(&self.client_session(cid)?)?;
+        // a shown popup has the keyboard (unless the layer below was chosen)
+        if let Some(p) = self.shown_popup(&s.id).filter(|_| !self.popup_below.contains(&s.id)) {
+            return Some(p.pane.clone());
+        }
         Some(s.windows.get(s.active)?.focus.clone())
     }
 
@@ -649,6 +689,11 @@ impl Server {
 
     fn pane_gone(&mut self, pane: &str, code: i32) {
         self.panes.remove(pane);
+        if self.popup_gone(pane) {
+            let _ = std::fs::remove_file(paths::pane_socket(pane));
+            self.ext.emit("pane_exit", &[("pane", pane.to_string()), ("status", code.to_string())]);
+            return;
+        }
         // a web pane closed: its page goes too
         if self.webs.remove(pane).is_some() {
             let msg = format!("\x1b]7733;webclose;id={}\x07", pin_id(pane)).into_bytes();
@@ -740,6 +785,7 @@ impl Server {
                 p.set_size(r.w.max(1), r.h.max(1));
             }
         }
+        self.layout_popups();
     }
 
     // ── drawing ──
@@ -812,6 +858,18 @@ impl Server {
                 let crossing = cell.text == "│" || cell.text == "─";
                 let text = if crossing && !b.vertical || crossing && cell.text == "─" { "┼" } else if b.vertical { "│" } else { "─" };
                 *cell = Cell { text: text.into(), fg: if near { active } else { dim }, bg: Color::Default, flags: 0 };
+            }
+        }
+        // a popup floats over the panes and has the cursor
+        if let Some((cur, sh)) = self.draw_popup(&sid, &mut grid) {
+            // the popup has the keyboard: its cursor; else the pane below keeps its own (if not covered)
+            if !self.popup_below.contains(&sid) {
+                cursor = cur;
+                shape = sh;
+            } else if let Some((outer, _)) = self.shown_popup(&sid).map(|p| self.popup_rect(p)) {
+                if cursor.is_some_and(|(x, y)| x >= outer.x && x < outer.x + outer.w && y >= outer.y && y < outer.y + outer.h) {
+                    cursor = None;
+                }
             }
         }
         // the status line, and the hint bar above it when that module is on
@@ -1676,6 +1734,7 @@ impl Server {
             out
         };
         match cmd {
+            "popup" | "display-popup" | "popup-toggle" | "popup-hide" | "popup-close" | "popup-list" | "choose-popup" | "popup-next" | "popup-layer" | "popup-move" => self.popup_command(cid, ctx.clone().or(target.clone()), cmd, args),
             "if-shell" | "if" => {
                 let cond = positional.first().cloned().unwrap_or_default();
                 let yes = if flag("-F") {
@@ -2064,7 +2123,6 @@ impl Server {
                 out.extend(self.keys.table.iter().filter(|(_, b)| b.repeat).map(|(c, _)| format!("repeat {}", name(c))));
                 Ok(out.join("\n"))
             }
-            "display-popup" | "popup" => Err(format!("{cmd}: not in zeit yet")),
             other => Err(format!("unknown command {other:?}")),
         }
     }
