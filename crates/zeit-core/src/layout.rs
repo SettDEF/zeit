@@ -228,3 +228,66 @@ mod tests {
         assert_eq!(l.place(AREA).0[0].1.w, 48);
     }
 }
+
+/// tmux's preset layouts, for panes in this order (the first is the main one).
+pub const PRESETS: &[&str] = &["even-horizontal", "even-vertical", "main-vertical", "main-horizontal", "tiled"];
+
+impl Layout {
+    /// Equal shares, side by side (true) or stacked.
+    fn even(ids: &[String], side_by_side: bool) -> Layout {
+        match ids {
+            [] => Layout::Leaf(String::new()),
+            [one] => Layout::Leaf(one.clone()),
+            [first, rest @ ..] => Layout::Split { side_by_side, ratio: 1.0 / ids.len() as f32, a: Box::new(Layout::Leaf(first.clone())), b: Box::new(Layout::even(rest, side_by_side)) },
+        }
+    }
+
+    /// A preset layout over `ids` (tmux's names); None for an unknown name.
+    pub fn preset(name: &str, ids: &[String]) -> Option<Layout> {
+        if ids.len() < 2 {
+            return ids.first().map(|i| Layout::Leaf(i.clone()));
+        }
+        Some(match name {
+            "even-horizontal" => Layout::even(ids, true),
+            "even-vertical" => Layout::even(ids, false),
+            "main-vertical" | "main-horizontal" => {
+                let side = name == "main-vertical";
+                Layout::Split { side_by_side: side, ratio: 0.6, a: Box::new(Layout::Leaf(ids[0].clone())), b: Box::new(Layout::even(&ids[1..], !side)) }
+            }
+            "tiled" => {
+                let cols = (ids.len() as f32).sqrt().ceil() as usize;
+                let rows: Vec<Layout> = ids.chunks(cols).map(|r| Layout::even(r, true)).collect();
+                fn stack(rows: &[Layout]) -> Layout {
+                    match rows {
+                        [one] => one.clone(),
+                        [first, rest @ ..] => Layout::Split { side_by_side: false, ratio: 1.0 / rows.len() as f32, a: Box::new(first.clone()), b: Box::new(stack(rest)) },
+                        [] => Layout::Leaf(String::new()),
+                    }
+                }
+                stack(&rows)
+            }
+            _ => return None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    #[test]
+    fn presets_place_every_pane() {
+        let ids: Vec<String> = (0..5).map(|i| format!("p{i}")).collect();
+        let area = Rect { x: 0, y: 0, w: 100, h: 40 };
+        for name in PRESETS {
+            let l = Layout::preset(name, &ids).unwrap();
+            assert_eq!(l.ids(), ids, "{name} keeps the order");
+            let (placed, _) = l.place(area);
+            assert!(placed.iter().all(|(_, r)| r.w > 0 && r.h > 0), "{name}: every pane has room");
+        }
+        // even-horizontal: equal widths (give or take the borders' rounding)
+        let (placed, _) = Layout::preset("even-horizontal", &ids).unwrap().place(area);
+        let ws: Vec<u16> = placed.iter().map(|(_, r)| r.w).collect();
+        assert!(ws.iter().max().unwrap() - ws.iter().min().unwrap() <= 2, "{ws:?}");
+    }
+}

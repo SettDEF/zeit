@@ -190,6 +190,13 @@ impl Keys {
             "bind : command-prompt",
             "bind s choose-tree -s",
             "bind w choose-tree -w",
+            "bind Space next-layout",
+            "bind q display-panes",
+            "bind M-1 select-layout even-horizontal",
+            "bind M-2 select-layout even-vertical",
+            "bind M-3 select-layout main-horizontal",
+            "bind M-4 select-layout main-vertical",
+            "bind M-5 select-layout tiled",
         ] {
             k.line(line);
         }

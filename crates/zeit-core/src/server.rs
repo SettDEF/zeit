@@ -64,6 +64,8 @@ enum Overlay {
     Prompt { label: String, text: String, cur: usize, then: Then },
     /// (label, target) rows
     Choose { items: Vec<(String, String)>, sel: usize, template: Option<String> },
+    /// display-panes: each pane's number, a digit picks one
+    Panes,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +105,8 @@ pub struct Server {
     activity: HashSet<String>,
     /// the latest copy-mode search: text, and whether it went up
     last_search: Option<(String, bool)>,
+    /// which preset layout a window is on (for next-layout), by its panes
+    layout_at: HashMap<String, usize>,
     /// commands z.rule sent to another pane
     jobs: Vec<Job>,
     ticking: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -145,7 +149,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, jobs: Vec::new(), ticking: Default::default() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), jobs: Vec::new(), ticking: Default::default() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -794,6 +798,19 @@ impl Server {
             write_text(&mut grid, hr, 1, &hint, Color::Indexed(7), Color::Indexed(0), 0);
         }
         if let Some(o) = &overlay {
+            if matches!(o, Overlay::Panes) {
+                // each pane's number, large in its middle; the focused one stands out
+                for (i, (id, r)) in placed.iter().enumerate() {
+                    let label = format!("  {i}  ");
+                    let x = r.x as usize + (r.w as usize).saturating_sub(label.len()) / 2;
+                    let y = r.y as usize + r.h as usize / 2;
+                    let (fg, bg) = if *id == w.focus { (self.look.on_primary, self.look.primary) } else { (Color::Indexed(0), self.look.border) };
+                    for dy in 0..3 {
+                        write_text(&mut grid, (y + dy).saturating_sub(1), x, &" ".repeat(label.len()), fg, bg, 0);
+                    }
+                    write_text(&mut grid, y, x, &label, fg, bg, zeit_proto::BOLD);
+                }
+            }
             let at = self.draw_overlay(o, &mut grid, status_row, area);
             if matches!(o, Overlay::Prompt { .. }) {
                 cursor = at;
@@ -1862,6 +1879,34 @@ impl Server {
                 Ok(String::new())
             }
             "jobs" => Ok(self.jobs.iter().map(|j| format!("{}  {}  {}", j.id, j.status_text(), j.cmd)).collect::<Vec<_>>().join("\n")),
+            "select-layout" | "selectl" | "next-layout" | "nextl" | "previous-layout" | "prevl" => {
+                let p = target.clone().or(ctx.clone()).ok_or("no window")?;
+                let (sid, wi) = self.where_is(&p).ok_or("no window")?;
+                let ids = self.session(&sid).unwrap().windows[wi].layout.ids();
+                let key = format!("{sid}:{}", ids.join(","));
+                let at = self.layout_at.get(&key).copied();
+                let name = match cmd {
+                    "next-layout" | "nextl" => crate::layout::PRESETS[at.map(|i| (i + 1) % crate::layout::PRESETS.len()).unwrap_or(0)].to_string(),
+                    "previous-layout" | "prevl" => crate::layout::PRESETS[at.map(|i| (i + crate::layout::PRESETS.len() - 1) % crate::layout::PRESETS.len()).unwrap_or(crate::layout::PRESETS.len() - 1)].to_string(),
+                    _ => positional.first().cloned().unwrap_or_else(|| "tiled".into()),
+                };
+                let l = Layout::preset(&name, &ids).ok_or_else(|| format!("select-layout: {name}? ({})", crate::layout::PRESETS.join(", ")))?;
+                if let Some(i) = crate::layout::PRESETS.iter().position(|x| *x == name) {
+                    self.layout_at.insert(key, i);
+                }
+                let s = self.session_mut(&sid).unwrap();
+                s.windows[wi].layout = l;
+                s.windows[wi].zoom = false;
+                self.layout_all();
+                self.save();
+                self.notice_all(format!("layout: {name}"));
+                Ok(String::new())
+            }
+            "display-panes" | "displayp" => {
+                let cid = cid.ok_or("display-panes needs an attached client")?;
+                self.open_overlay(cid, Overlay::Panes);
+                Ok(String::new())
+            }
             "__keys" => {
                 // for the client: which keys are zeit's, and which repeat
                 let name = |c: &Chord| format!("{}{}{}", if c.ctrl { "C-" } else { "" }, if c.alt { "M-" } else { "" }, c.key);
@@ -1870,7 +1915,7 @@ impl Server {
                 out.extend(self.keys.table.iter().filter(|(_, b)| b.repeat).map(|(c, _)| format!("repeat {}", name(c))));
                 Ok(out.join("\n"))
             }
-            "display-panes" | "display-popup" | "popup" | "select-layout" | "next-layout" => Err(format!("{cmd}: not in zeit yet")),
+            "display-popup" | "popup" => Err(format!("{cmd}: not in zeit yet")),
             other => Err(format!("unknown command {other:?}")),
         }
     }
@@ -2180,6 +2225,20 @@ impl Server {
             let mut keep = true;
             let mut run: Option<Box<dyn FnOnce(&mut Server)>> = None;
             match &mut o {
+                Overlay::Panes => {
+                    keep = false;
+                    if let Some(n) = k.key.chars().next().and_then(|c| c.to_digit(10)).filter(|_| k.key.chars().count() == 1 && !k.ctrl) {
+                        run = Some(Box::new(move |s: &mut Server| {
+                            let Some(sid) = s.client_session(cid) else { return };
+                            let Some(ses) = s.session(&sid) else { return };
+                            let ids = ses.windows[ses.active].layout.ids();
+                            if let Some(p) = ids.get(n as usize) {
+                                let p = p.clone();
+                                s.focus_pane(&p);
+                            }
+                        }));
+                    }
+                }
                 Overlay::Prompt { text, cur, then, .. } => {
                     let chars: Vec<char> = text.chars().collect();
                     match (k.ctrl, k.key.as_str()) {
@@ -2395,6 +2454,7 @@ impl Server {
         let l = &self.look;
         let cols = grid.first().map(|r| r.len()).unwrap_or(0);
         match o {
+            Overlay::Panes => None,
             Overlay::Prompt { label, text, cur, .. } => {
                 write_text(grid, status_row, 0, &" ".repeat(cols), l.status_fg, l.status_bg, 0);
                 write_text(grid, status_row, 0, "\u{e0b6}", l.primary, l.status_bg, 0);
