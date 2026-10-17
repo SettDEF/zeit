@@ -1,9 +1,4 @@
-//! The pane holder: one small process per pane that owns the pty and the shell.
-//!
-//! The server talks to it over the pane's socket. If the server crashes or is
-//! upgraded, the holder keeps the shell alive and keeps its output (up to
-//! `KEEP` bytes) until a server connects again, so nothing a shell printed in
-//! between is lost. tmux keeps ptys in the server itself; one crash ends them all.
+//! One process per pane that owns its pty and shell, so shells outlive the server.
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};

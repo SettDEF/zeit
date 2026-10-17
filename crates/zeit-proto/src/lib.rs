@@ -1,7 +1,4 @@
-//! zeit's protocol: what the server, its clients and the pane holders say to
-//! each other over Unix sockets. Every frame is a little-endian u32 length and a
-//! postcard-encoded message. The first message both ways is a `Hello` with the
-//! protocol version, so old and new versions can tell what the other speaks.
+//! The protocol between server, clients and pane holders (versioned frames).
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::{self, Read, Write};

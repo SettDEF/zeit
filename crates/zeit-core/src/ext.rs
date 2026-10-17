@@ -1,16 +1,4 @@
-//! Extensions: `~/.config/zeit/init.lua`, like Neovim.
-//!
-//! ```lua
-//! local z = require('zeit')
-//! z.modules { 'hintbar', 'frames +rounded +names', 'floating +popout' }
-//! require('zeit.frames').setup { names = true }
-//! z.map('<prefix>g', function() z.cmd('new-window -n git lazygit') end)
-//! z.on('pane_exit', function(e) if e.status ~= '0' then z.notify(e.pane .. ' failed') end end)
-//! ```
-//!
-//! Built-in features are modules (`zeit.frames`, …) exactly like plugins in
-//! `plugins/<name>/` (their `init.lua`, and `require` finds their `lua/`), so a
-//! plugin can do anything a feature does. Errors are collected, never fatal.
+//! Extensions: init.lua (z.modules, setup{}, z.map, z.on, z.cmd) and plugins.
 
 use crate::keys::Chord;
 use mlua::{Function, Lua, RegistryKey, Table, Value};

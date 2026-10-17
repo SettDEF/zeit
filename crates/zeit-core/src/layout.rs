@@ -1,5 +1,4 @@
-//! A window's panes: a binary tree of splits, placed in character cells with a
-//! one-cell border between neighbours. Pure geometry, tested on its own.
+//! A window's panes as a tree of splits, placed in cells.
 
 use crate::keys::Dir;
 

@@ -1,5 +1,4 @@
-//! A pane on the server's side: the connection to its holder, the emulator
-//! (alacritty_terminal, the same zash uses) and the screen it keeps.
+//! A pane on the server's side: holder connection, emulator, screen.
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;

@@ -1,5 +1,4 @@
-//! Where zeit keeps things: sockets in the runtime dir (private, gone at logout),
-//! the timeline and saved sessions in the state dir, config in the config dir.
+//! Where zeit keeps sockets, state and config.
 
 use std::path::PathBuf;
 

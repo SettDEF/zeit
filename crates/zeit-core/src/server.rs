@@ -1,9 +1,4 @@
-//! zeitd: owns sessions, windows and panes; serves clients over its socket.
-//!
-//! One thread runs the state (everything below `Server`); others only read
-//! sockets and pass events in. Sessions are written down after every change, so
-//! a new server (after a crash or `zeit upgrade`) finds the same sessions and
-//! reconnects to the pane holders, which kept the shells running meanwhile.
+//! zeitd: sessions, windows and panes; serves clients; restores after a restart.
 
 use crate::ext::{words, Ext};
 use crate::keys::{Action, Chord, Dir, Keys};

@@ -1,7 +1,4 @@
-//! The timeline, from the first day: every pane's commands as the shell marks
-//! them (OSC 133: prompt, output start, end with exit status), appended to
-//! `$XDG_STATE_HOME/zeit/timeline/<pane>.jsonl`. Scrubbing through it comes
-//! later (Z3); what it needs is recorded now, so nothing is lost meanwhile.
+//! The timeline: every pane's shell marks (OSC 133), appended per pane.
 
 use std::io::Write;
 
