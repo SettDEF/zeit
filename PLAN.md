@@ -1,0 +1,216 @@
+# zeit — plan
+
+**Your shells keep running. Every terminal can pick them up.**
+zeit (German for *time*: sessions that outlast the window, the logout, the
+reboot) is a terminal multiplexer: a server that owns your shells, their
+scrollback and layouts, and clients that show them. In zash it is native:
+nothing is parsed or drawn twice, popups and smooth scrolling keep working,
+and it costs next to nothing. In any other terminal `zeit attach` works like
+tmux, with the same sessions and keys.
+
+## Why not tmux
+
+tmux is a terminal inside a terminal. Every byte a program writes is parsed
+by tmux, redrawn as escape codes, then parsed and drawn again by the outer
+terminal. That costs CPU and latency, and whatever the outer terminal can do
+that tmux does not pass on is lost: images, real popups, smooth scrolling,
+shell marks, font sizes, the zash UI. Configuration is a language of its own,
+copy mode is a second Vim, and nothing survives a reboot without plugins.
+
+zeit keeps what makes tmux essential (sessions that live on, splits, windows,
+keys under a prefix, scripting) and fixes the rest:
+
+| | tmux | **zeit** |
+|---|---|---|
+| In zash | a second emulator between program and screen | **native**: zash draws the server's screens directly; one parse, no redraw |
+| Cost | parse + re-encode + parse again | parse once; damage-only updates over shared memory (local) |
+| Features of the outer terminal | lost unless passed through | **kept**: images, popups, smooth scroll, marks, the zash UI protocol |
+| Survives | closing the terminal | closing the terminal, logout, **reboot** (layouts, folders, commands, scrollback restored) |
+| Copy mode | its own key tables | zett-edit: Vim exactly as Neovim does it, `/` search, yank to the clipboard |
+| Config | its own language | `zeit.toml` + **your tmux.conf keys read as they are** + Lua |
+| Remote | ssh, then tmux on the far side, drawn as text | `zeit attach host`: the remote session drawn **natively** by zash |
+| Overview | `choose-tree` text list | a dashboard with live previews of every pane |
+
+## The pieces
+
+```
+zeitd          the server: owns ptys, emulation, scrollback, layouts, marks;
+               one per user, started on demand or as a systemd user service;
+               socket: $XDG_RUNTIME_DIR/zeit/<name>.sock (dir 0700)
+zeit           the command line: attach, new, ls, kill, send-keys, capture,
+               split, … (tmux's verbs, same meanings), and the text client
+zash           the native client: shows zeit sessions like its own panes
+zeit-core      crate: sessions, windows, panes, layout tree, pty handling,
+               emulation (alacritty_terminal, shared with zash), scrollback,
+               shell marks, persistence
+zeit-proto     crate: the protocol between server and clients (versioned)
+```
+
+zash's own splits and tabs (built 2026-10-17, keys from tmux.conf) become the
+local face of zeit: the same layout tree, the same key reader, so a pane in a
+zash window and a pane in a zeit session behave the same.
+
+## Concepts (tmux's, so nothing has to be relearned)
+
+- **Server**: one per user and socket name (`-L name` for more, as in tmux).
+- **Session**: a named set of windows; lives until killed. Several clients may
+  attach at once (pairing, or the same session on two screens).
+- **Window**: a tab; has a layout of panes.
+- **Pane**: one pty + emulator + scrollback + shell marks.
+- **Client**: a zash window, `zeit attach` in a terminal, or a control client
+  (scripts, zett, the shell's widgets).
+
+## Features
+
+### tmux parity (nothing may be missing)
+
+- Sessions: new, attach, detach (prefix d, or closing the window), list,
+  rename, kill, switch, last session, nested sessions (prefix sent through).
+- Windows: new (in the current folder), close, rename, move, swap, next /
+  previous / last / by number, find by name, monitor activity / silence /
+  bell with marks in the status line.
+- Panes: split (side by side / stacked, in the current folder), close, zoom,
+  resize (keys with repeat, mouse drag on borders), select by direction /
+  number / last, swap, rotate, break out to a window, join into another,
+  mark a pane, display numbers (prefix q), synchronize input (type into all),
+  remain-on-exit and respawn, pipe a pane's output to a command or file.
+- Layouts: even-horizontal, even-vertical, main-horizontal, main-vertical,
+  tiled, custom saved layouts; cycle with a key.
+- Copy mode: scrollback with zett-edit's Vim grammar (motions, text objects,
+  visual / line / block, `/` `?` `n` `N`, marks), yank to the clipboard
+  (Wayland and OSC 52), paste buffers with history (`choose-buffer`).
+- Scrollback: per pane, size per session; search across all panes.
+- Status line: left / centre / right parts, per-window labels, clock,
+  host, the prefix indicator, git branch, Vitals (CPU, battery); styled with
+  tinct; may be hidden; in zash drawn natively, not as a text row.
+- Keys: a prefix (Ctrl+Space from your tmux.conf), key tables, `-n` (no
+  prefix) and `-r` (repeat), the command prompt (prefix :) with completion,
+  `bind` / `unbind` at run time; **tmux.conf's keys read as they are**.
+- Mouse: select pane, resize borders, scroll, select text, middle paste,
+  right-click menu.
+- Terminal features passed through: true colour, styled / coloured
+  underlines, OSC 8 links, OSC 52 clipboard, focus events, bracketed paste,
+  Kitty keyboard protocol, synchronized output, cursor shapes, titles, bell,
+  images (Kitty graphics and sixel kept per pane).
+- Environment: `update-environment` (DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK
+  refreshed on attach), `ZEIT`, `ZEIT_PANE`, a TERM programs recognise
+  (`tmux-256color`-compatible terminfo, so existing tools work).
+- Scripting: every action is a command; `zeit <command>` from scripts
+  (`send-keys`, `capture-pane` (text, with colours, or as JSON),
+  `display-message -p` formats, `list-panes -F`), hooks (session created,
+  pane exited, client attached, …), wait-for channels.
+- Popups: `display-popup` (a floating pane over the layout), menus.
+- `choose-tree` for sessions, windows and panes.
+
+### Beyond tmux
+
+- **Native in zash.** zash draws the server's screens itself (shared-memory
+  grids and damage), with its GPU renderer: smooth scrolling, the cursor
+  glide, the completion popup, prompt marks, Neovim mode, images. Detaching
+  is just closing the window.
+- **Survives reboots.** The server writes sessions down (layout, folders,
+  the command each pane ran, scrollback compressed) and restores them on the
+  next start: shells come back in their folders, editors reopen their files,
+  long-running servers can be marked to restart.
+- **A dashboard.** `zeit` with no arguments in zash, or prefix s: every
+  session and pane as live miniatures, with what runs in it, its folder, git
+  branch, CPU and memory (from Vitals); type to filter; Enter to attach.
+- **Projects.** `zeit p [folder]` opens the session for a project (made from
+  a template the first time: windows, splits, commands, like tmuxinator but in
+  TOML); zett opens a project's session next to its files.
+- **Long commands tell you.** Shell marks know when a command ends; one in a
+  background pane that ran longer than a minute sends a desktop notification
+  (or a quiet mark in the status line), with its exit status.
+- **Agents in panes.** Claude Code sessions in zeit are known to the shell's
+  AI activity panel: jump to the pane that needs you.
+- **Remote, natively.** `zeit attach user@host`: the server runs on the
+  remote machine, the protocol goes over SSH, and zash draws it as if it were
+  local (images, popups and all), with local echo prediction on slow links.
+- **Share a session.** A read-only or full link for another user on the same
+  machine (socket permissions), shown in the status line while active.
+- **Lua.** Status-line parts, key actions, hooks and layouts in Lua, the same
+  API style as zett.
+
+## The zash UI protocol
+
+Programs today can only print characters into the grid. zash already does
+more for its completion popup: the shell sends a private message (OSC 7733)
+and zash draws a real overlay **on top of** the program, outside the grid.
+That becomes a protocol any program can use (zeit, zett in the terminal, the
+shell plugin, scripts), so their UI is really part of the window:
+
+- **popup**: a list at a cell (items, selection, descriptions, icons)
+- **overlay text**: styled text floating over cells, any size or font, not
+  taking grid space (hints, inline errors, ghost text, labels)
+- **notice**: a toast in the corner of the pane
+- **panel**: a side or bottom panel with rows and actions
+- **image**: by id, placed at a cell (with the Kitty protocol underneath)
+- **status**: parts for zeit's status line drawn by zash
+
+Every message has a text fallback, so the same program still works in a
+plain terminal (and through zeit to a plain terminal): a popup becomes a
+boxed list in the grid, a notice a line in the status bar.
+
+## Protocol (server ⇄ client)
+
+- Unix socket; length-prefixed binary frames (postcard / serde), versioned
+  with a handshake; JSON for control clients.
+- Local zash clients map pane grids through shared memory (memfd): the
+  server writes cells and a damage list; the client reads only what changed.
+- Text clients get escape-coded diffs, like tmux does, with a minimal redraw
+  per frame.
+- Input: keys and mouse in the client's terms; paste as one message.
+- Every server action is a command; clients and scripts send the same ones.
+
+## Performance budgets (on this laptop)
+
+- Idle: 0 % CPU, no wakeups while nothing changes.
+- Added latency in zash: under 0.5 ms per keystroke (local, shared memory).
+- Throughput through zeit in zash: within 10 % of a plain zash pane; faster
+  than tmux in any terminal (one parse instead of three).
+- Attach to a session with 20 panes: under 50 ms to the first frame.
+- Memory: under 2 MB per pane plus its scrollback (compressed when idle).
+- Restore after reboot: layouts and shells back in under a second.
+
+## Milestones
+
+- **Z0 — sessions that outlive the window.** zeitd with sessions, windows,
+  panes, layouts; zash attaches natively; closing zash detaches.
+- **Z1 — zeit in any terminal.** The text client: `zeit attach`, status line,
+  prefix keys from tmux.conf, mouse, the full CLI (`new`, `ls`, `kill`,
+  `send-keys`, `capture-pane`, …).
+- **Z2 — tmux parity.** Everything in "tmux parity" above: copy mode with
+  zett-edit, layouts, swap / break / join, synchronize, popups, hooks,
+  choose-tree, buffers, environment updates.
+- **Z3 — time.** Persistence and restore after reboot, scrollback on disk,
+  pane templates and project sessions.
+- **Z4 — the zash UI protocol** across zeit (popups, overlays, notices,
+  panels, images) with text fallbacks.
+- **Z5 — beyond.** Dashboard with live previews, notifications for long
+  commands, agents, Vitals per pane, zett integration.
+- **Z6 — remote.** `zeit attach host` over SSH with native drawing in zash and
+  echo prediction; shared sessions.
+
+## Testing
+
+- The protocol: round trips, version mismatches, clients that vanish.
+- Emulation: the same vttest screens as zash, through zeit, in zash and in a
+  plain terminal (screens compared cell by cell).
+- tmux behaviour: a script of tmux commands and the same in zeit, layouts and
+  pane contents compared.
+- Soak: a day of output through 50 panes, memory flat, no lost bytes.
+- Restore: kill the server mid-work, restart, sessions back as they were.
+
+## Decided
+
+- Name: **zeit** (2026-10-17).
+- Its own project (works without zash); shares the emulation core with zash.
+- tmux's words and verbs, tmux.conf's keys; nothing to relearn.
+- Rust, no C dependencies beyond libc.
+
+## Open
+
+- Restoring programs other than shells and editors after a reboot (which
+  ones may safely be restarted?).
+- Whether zash's own splits stay a separate (local-only) mode or always go
+  through zeitd (simpler code if always; one more process if so).
