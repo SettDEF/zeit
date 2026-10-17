@@ -878,6 +878,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "libc",
+ "serde_json",
  "zeit-core",
  "zeit-proto",
 ]

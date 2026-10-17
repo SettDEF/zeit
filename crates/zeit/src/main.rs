@@ -1,6 +1,7 @@
 //! zeit: the command line, the text client, the server and the pane holders,
 //! in one binary.
 
+mod activity;
 mod cli;
 mod client;
 
@@ -159,6 +160,9 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             }
         }
+        // Claude Code's hook, and the view of what Claude runs (a zfloat on the right)
+        Some("claude-hook") => activity::hook(),
+        Some("activity") => activity::view(args.get(1).map(String::as_str).unwrap_or("")),
         Some("server") => {
             let exe = std::env::current_exe().unwrap_or_else(|e| fail(&e.to_string()));
             if let Err(e) = zeit_core::server::run("default", exe) {
