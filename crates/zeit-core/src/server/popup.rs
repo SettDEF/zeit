@@ -275,7 +275,10 @@ impl Server {
                     }
                     None => {
                         let here = ctx.clone().or_else(|| cid.and_then(|c| self.client_pane(c)));
-                        let dir = dir.or_else(|| here.as_ref().and_then(|p| self.panes.get(p)).map(|p| p.cwd())).or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_else(|| PathBuf::from("/"));
+                        let dir = dir.or_else(|| here.as_ref().and_then(|p| self.panes.get(p)).map(|p| p.cwd()))
+                            // from a config hook (no pane asked): the folder of the session's current pane
+                            .or_else(|| self.session(&sid).and_then(|s| s.windows.get(s.active)).and_then(|w| self.panes.get(&w.focus)).map(|p| p.cwd()))
+                            .or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_else(|| PathBuf::from("/"));
                         // a command keeps its output on screen when it ends; a shell is just a shell
                         let argv = if command.is_empty() {
                             Vec::new()
