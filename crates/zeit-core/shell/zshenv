@@ -34,7 +34,8 @@ if [[ -o interactive ]]; then
     [[ -n $_zeit_job ]] || return 0
     # over the empty prompt line the hand-off left
     print -n "\e[1A\e[2K\r\e]7733;job;$_zeit_job\a"
-    print -r -- "▸ $_zeit_job_cmd"
+    local one=${_zeit_job_cmd%%$'\n'*}
+    print -r -- "▸ ${one[1,COLUMNS-4]}"
     unset _zeit_job _zeit_job_cmd
   }
 

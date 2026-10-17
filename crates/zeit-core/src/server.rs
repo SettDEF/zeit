@@ -55,6 +55,8 @@ struct Client {
     notice: Option<String>,
     /// an input line or a picker, over everything; it takes the keys while open
     overlay: Option<Overlay>,
+    /// the job rows last told to the terminal (OSC 7733;rows), to send only changes
+    last_rows: String,
 }
 
 #[derive(Clone, Debug)]
@@ -246,7 +248,7 @@ impl Server {
                         }
                     }
                 });
-                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None });
+                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new() });
             }
             Ev::Gone(id) => {
                 self.clients.remove(&id);
@@ -262,6 +264,7 @@ impl Server {
             Ev::Tick => {
                 let running: Vec<String> = self.jobs.iter().filter(|j| j.end.is_none()).map(|j| j.id.clone()).collect();
                 for id in running {
+                    self.job_progress(&id);
                     self.paint_job(&id);
                 }
                 self.dirty = true;
@@ -797,6 +800,14 @@ impl Server {
         c.last = grid;
         let frame = Frame { cols, rows, changed, cursor, cursor_shape: shape, title, modes };
         self.send(cid, &ServerMsg::Frame(frame));
+        // job lines, for terminals that draw them small (zash); sent when they change
+        let rows_msg = self.job_rows(&placed);
+        if self.clients.get(&cid).is_some_and(|c| c.last_rows != rows_msg) {
+            if let Some(c) = self.clients.get_mut(&cid) {
+                c.last_rows = rows_msg.clone();
+            }
+            self.send(cid, &ServerMsg::Passthrough(format!("\x1b]7733;rows;{rows_msg}\x07").into_bytes()));
+        }
         for seq in self.pending.remove(&cid).unwrap_or_default() {
             self.send(cid, &ServerMsg::Passthrough(seq));
         }
@@ -2422,6 +2433,10 @@ struct Job {
     open: bool,
     /// the output once it ended (the run pane may close)
     kept: Vec<String>,
+    /// where it runs (bottom, right, window)
+    place: String,
+    /// how far along, read from its output (cargo's `120/300`, a `45%`)
+    progress: Option<f32>,
 }
 
 fn duration(d: std::time::Duration, tenths: bool) -> String {
@@ -2487,7 +2502,7 @@ impl Server {
             // typed ahead: the new shell reads it once its prompt is up
             p.input(format!("{line}\r").as_bytes());
         }
-        self.jobs.push(Job { id: id.clone(), origin: origin.to_string(), cmd, run: Some(run), line: None, start: std::time::Instant::now(), end: None, out: None, sent: true, open: false, kept: Vec::new() });
+        self.jobs.push(Job { id: id.clone(), origin: origin.to_string(), cmd, run: Some(run), line: None, start: std::time::Instant::now(), end: None, out: None, sent: true, open: false, kept: Vec::new(), place: place.to_string(), progress: None });
         // a long list of old jobs is not needed
         if self.jobs.len() > 200 {
             self.jobs.remove(0);
@@ -2622,4 +2637,77 @@ impl Server {
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// How far a build is, from a line of its output: `[====>   ] 120/300` or `45%`.
+fn progress_of(line: &str) -> Option<f32> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    for w in words.iter().rev() {
+        if let Some(p) = w.strip_suffix('%').and_then(|v| v.parse::<f32>().ok()) {
+            return Some(p / 100.0);
+        }
+        if let Some((a, b)) = w.trim_end_matches(':').split_once('/') {
+            if let (Ok(a), Ok(b)) = (a.parse::<f32>(), b.parse::<f32>()) {
+                if b > 0.0 && a <= b && line.contains('[') {
+                    return Some(a / b);
+                }
+            }
+        }
+    }
+    None
+}
+
+impl Server {
+    fn job_progress(&mut self, id: &str) {
+        let Some(j) = self.jobs.iter().find(|j| j.id == id) else { return };
+        let Some(p) = j.run.as_ref().and_then(|r| self.panes.get(r)) else { return };
+        let at = p.abs_line();
+        let found = p.rows_text(at - 3, at + 1).iter().rev().find_map(|l| progress_of(l));
+        if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
+            if found.is_some() {
+                j.progress = found;
+            }
+        }
+    }
+
+    /// The job lines on screen, as OSC 7733;rows wants them.
+    fn job_rows(&self, placed: &[(String, Rect)]) -> String {
+        let mut items = Vec::new();
+        for (id, r) in placed {
+            let Some(p) = self.panes.get(id) else { continue };
+            let (hist, d) = {
+                let t = p.term.lock();
+                (t.grid().history_size() as i64, t.grid().display_offset() as i64)
+            };
+            for j in self.jobs.iter().filter(|j| &j.origin == id) {
+                let Some(line) = j.line else { continue };
+                let vy = line - hist + d;
+                if vy < 0 || vy >= i64::from(r.h) {
+                    continue;
+                }
+                let mut f = vec![(r.y as i64 + vy).to_string(), r.x.to_string(), r.w.to_string(), format!("{} {}", if j.open { "▾" } else { "▸" }, j.cmd)];
+                let alive = j.run.as_ref().is_some_and(|x| self.panes.contains_key(x));
+                let arrow = match j.place.as_str() {
+                    "right" => "→",
+                    "window" => "⧉",
+                    _ => "↓",
+                };
+                f.push(format!("m:{arrow} {}{}", j.place, if alive { "" } else { " (closed)" }));
+                if j.end.is_some() {
+                    f.push(format!("m:{} lines", j.kept.len()));
+                }
+                let tone = match j.end {
+                    None => 'r',
+                    Some((_, 0)) => 'g',
+                    Some(_) => 'b',
+                };
+                f.push(format!("{tone}:{}", j.status_text()));
+                if let (None, Some(pr)) = (j.end, j.progress) {
+                    f.push(format!("%:{pr:.3}"));
+                }
+                items.push(f.join("\x1f"));
+            }
+        }
+        items.join("\x1e")
+    }
 }
