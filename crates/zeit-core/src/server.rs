@@ -25,6 +25,8 @@ enum Ev {
     Notice(String),
     /// a second passed while a job runs (its line shows the time)
     Tick,
+    /// the config's files changed on disk: it is loaded again
+    ConfigChanged,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -178,6 +180,36 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
             }
         });
     }
+    {
+        // init.lua and plugins: a look every two seconds (a stat each), a change reloads them
+        let tx = s.tx.clone();
+        std::thread::spawn(move || {
+            let files = || {
+                let dir = paths::config_dir();
+                let mut v = vec![dir.join("init.lua")];
+                let mut stack = vec![dir.join("plugins"), dir.join("lua")];
+                while let Some(d) = stack.pop() {
+                    for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                        let p = e.path();
+                        if p.is_dir() { stack.push(p) } else if p.extension().is_some_and(|x| x == "lua") { v.push(p) }
+                    }
+                }
+                v.sort();
+                v.iter().map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect::<Vec<_>>()
+            };
+            let mut last = files();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let now = files();
+                if now != last {
+                    last = now;
+                    if tx.send(Ev::ConfigChanged).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+    }
     s.rules_flag();
     s.restore();
     s.restore_popups();
@@ -285,6 +317,10 @@ impl Server {
                 self.dirty = true;
             }
             Ev::Notice(text) => self.notice_all(text),
+            Ev::ConfigChanged => match self.command(None, vec!["source-file".into()]) {
+                Ok(m) => self.notice_all(m),
+                Err(e) => self.notice_all(format!("config: {e}")),
+            },
             Ev::Tick => {
                 let running: Vec<String> = self.jobs.iter().filter(|j| j.end.is_none()).map(|j| j.id.clone()).collect();
                 for id in running {
