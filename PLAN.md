@@ -131,6 +131,41 @@ zash window and a pane in a zeit session behave the same.
 - **Lua.** Status-line parts, key actions, hooks and layouts in Lua, the same
   API style as zett.
 
+### Friendly like zellij, fast like tmux
+
+The things that make zellij pleasant to use, on zeit's cheaper core:
+
+- **Modes with a hint bar.** Besides the prefix, zeit has modes: *pane*,
+  *tab*, *resize*, *move*, *scroll*, *session*, and *locked* (all keys go to
+  the program). The bar at the bottom always shows what the keys do right
+  now, so nobody has to remember anything. In zash it is drawn natively (pills
+  in tinct colours, a small which-key panel when a mode opens); in other
+  terminals as one text row. Hidden with one setting once you know the keys.
+- **Floating panes.** A pane that floats over the layout (toggle with a key),
+  can be moved and resized with the mouse, pinned, or sent back into the
+  layout. Scratch shells, a quick `htop`, a running build log.
+- **Stacked panes.** Several panes in one slot, only the active one open, the
+  others as one-line title bars; scroll through them. Many terminals in a
+  small space.
+- **Swap layouts.** A key cycles the window through ready layouts (columns,
+  rows, main + stack, grid) that adapt to the number of panes.
+- **A welcome screen and session manager.** Starting zeit without a session
+  shows recent and running sessions, project folders and a field to name a new
+  one; the same manager opens over any session (prefix w): switch, rename,
+  kill, restore a dead one.
+- **Layout files.** Sessions described in TOML (windows, panes, sizes,
+  folders, commands, which pane floats); `zeit --layout dev.toml`; also the
+  form saved sessions take, so a session can be saved as a layout.
+- **Plugins in WASM.** Status-bar parts, pickers, a file tree, a git panel,
+  written in Rust (or anything that builds to WASM), sandboxed, with
+  permissions asked once (the same model as zett's plugins); small ones in
+  Lua.
+- **Pane names and frames.** Optional frames around panes with their names,
+  the command running and its exit status; in zash as thin native borders
+  with rounded corners, not box-drawing characters.
+- **Web client, later.** A session in a browser tab (zett's web viewer
+  draws the same protocol).
+
 ## The zash UI protocol
 
 Programs today can only print characters into the grid. zash already does
@@ -178,7 +213,9 @@ boxed list in the grid, a notice a line in the status bar.
   panes, layouts; zash attaches natively; closing zash detaches.
 - **Z1 — zeit in any terminal.** The text client: `zeit attach`, status line,
   prefix keys from tmux.conf, mouse, the full CLI (`new`, `ls`, `kill`,
-  `send-keys`, `capture-pane`, …).
+  `send-keys`, `capture-pane`, …). Modes with the hint bar.
+- **Z1½ — friendly.** Floating and stacked panes, swap layouts, the welcome
+  screen and session manager, layout files.
 - **Z2 — tmux parity.** Everything in "tmux parity" above: copy mode with
   zett-edit, layouts, swap / break / join, synchronize, popups, hooks,
   choose-tree, buffers, environment updates.
