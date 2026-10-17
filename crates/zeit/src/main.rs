@@ -121,6 +121,15 @@ fn main() {
                 fail(&e.to_string());
             }
         }
+        Some("__webpane") => {
+            // a web pane: the page is drawn by the terminal (zash); others see this note
+            let url = args.get(1).cloned().unwrap_or_default();
+            print!("\x1b]7733;webpane;url={url}\x07\x1b[?25l\r\n  \u{f0ac}  {url}\r\n\r\n  a web page: zash shows it here\r\n");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
         Some("server") => {
             let exe = std::env::current_exe().unwrap_or_else(|e| fail(&e.to_string()));
             if let Err(e) = zeit_core::server::run("default", exe) {

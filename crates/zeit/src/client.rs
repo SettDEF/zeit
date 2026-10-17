@@ -9,6 +9,8 @@ use zeit_core::keys::{chord_from_bytes, Chord, Keys};
 use zeit_proto::{read_msg, write_msg, Cell, ClientMsg, Color, CursorShape, ServerMsg};
 
 static RESIZED: AtomicBool = AtomicBool::new(false);
+/// web pages the terminal shows for this client (ids from webrect)
+static PINS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 extern "C" fn on_winch(_: libc::c_int) {
     RESIZED.store(true, Ordering::Relaxed);
@@ -45,6 +47,11 @@ impl Raw {
 
 impl Drop for Raw {
     fn drop(&mut self) {
+        if let Ok(p) = PINS.lock() {
+            for id in p.iter() {
+                print!("\x1b]7733;webhide;id={id}\x07");
+            }
+        }
         print!("\x1b]7733;keys;none\x07\x1b]7733;rows;\x07\x1b[0m\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[?25h\x1b[0 q\x1b[?1049l");
         let _ = std::io::stdout().flush();
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.0) };
@@ -171,6 +178,17 @@ pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<Strin
                     let _ = stdout.flush();
                 }
                 Ok(ServerMsg::Passthrough(seq)) => {
+                    // remember the web pages zash shows for us, to take them away on leaving
+                    let text = String::from_utf8_lossy(&seq);
+                    for part in text.split("7733;webrect;id=").skip(1) {
+                        if let Some(id) = part.split(';').next() {
+                            if let Ok(mut p) = PINS.lock() {
+                                if !p.contains(&id.to_string()) {
+                                    p.push(id.to_string());
+                                }
+                            }
+                        }
+                    }
                     let _ = stdout.write_all(&seq);
                     let _ = stdout.flush();
                 }

@@ -21,6 +21,8 @@ pub enum PaneEvent {
     Passthrough(String, Vec<u8>),
     /// a shell mark (OSC 133: A prompt, C output starts, D done) and the line it came at
     Mark { pane: String, kind: char, exit: Option<i32>, line: i64 },
+    /// the pane is a web page (zeit web): OSC 7733;webpane;url=…
+    WebPane { pane: String, url: String },
     /// keys the pane's program claims for itself (OSC 7733;keys;…)
     Keys { pane: String, msg: String },
     /// the command line the shell is about to run (OSC 7733;cmd;TEXT)
@@ -299,6 +301,7 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
                         Place::Job(job) => PaneEvent::JobLine { pane: id.clone(), job, line },
                         Place::Cmd(text) => PaneEvent::Cmd { pane: id.clone(), text },
                         Place::Keys(msg) => PaneEvent::Keys { pane: id.clone(), msg },
+                        Place::WebPane(url) => PaneEvent::WebPane { pane: id.clone(), url },
                     });
                 }
                 parser.advance(&mut *term.lock(), &bytes[last..]);
@@ -332,7 +335,7 @@ fn passthrough(chunk: &[u8]) -> Vec<Vec<u8>> {
         let start = i + p;
         let Some(end) = chunk[start..].iter().position(|&b| b == 0x07).map(|e| start + e + 1) else { break };
         // popups only: Neovim mode (7733;nvim) belongs to the pane, not to the outer window
-        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") && !chunk[start..end].starts_with(b"\x1b]7733;cmd;") && !chunk[start..end].starts_with(b"\x1b]7733;keys;") {
+        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") && !chunk[start..end].starts_with(b"\x1b]7733;cmd;") && !chunk[start..end].starts_with(b"\x1b]7733;keys;") && !chunk[start..end].starts_with(b"\x1b]7733;webpane;") {
             out.push(chunk[start..end].to_vec());
         }
         i = end;
@@ -342,6 +345,7 @@ fn passthrough(chunk: &[u8]) -> Vec<Vec<u8>> {
 
 enum Place {
     Mark(char, Option<i32>),
+    WebPane(String),
     Keys(String),
     Job(String),
     Cmd(String),
@@ -364,6 +368,8 @@ fn places(chunk: &[u8]) -> Vec<(usize, Place)> {
             }
         } else if let Some(job) = body.strip_prefix("7733;job;") {
             out.push((end.min(chunk.len()), Place::Job(job.to_string())));
+        } else if let Some(u) = body.strip_prefix("7733;webpane;url=") {
+            out.push((end.min(chunk.len()), Place::WebPane(u.to_string())));
         } else if let Some(k) = body.strip_prefix("7733;keys;") {
             out.push((end.min(chunk.len()), Place::Keys(k.to_string())));
         } else if let Some(cmd) = body.strip_prefix("7733;cmd;") {

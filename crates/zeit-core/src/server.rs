@@ -57,6 +57,8 @@ struct Client {
     overlay: Option<Overlay>,
     /// the job rows last told to the terminal (OSC 7733;rows), to send only changes
     last_rows: String,
+    /// the web panes last told to the terminal: id → (x, y, w, h, focused)
+    last_pins: HashMap<u32, (u16, u16, u16, u16, bool)>,
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +111,8 @@ pub struct Server {
     last_search: Option<(String, bool)>,
     /// which preset layout a window is on (for next-layout), by its panes
     layout_at: HashMap<String, usize>,
+    /// panes that are web pages (zeit web), and their address
+    webs: HashMap<String, String>,
     /// keys a pane's program claimed (OSC 7733;keys): all, or these chords
     claims: HashMap<String, (bool, HashSet<String>)>,
     /// the command each pane runs right now (from the shell's OSC 7733;cmd)
@@ -157,7 +161,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -260,7 +264,7 @@ impl Server {
                         }
                     }
                 });
-                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new() });
+                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new() });
             }
             Ev::Gone(id) => {
                 self.clients.remove(&id);
@@ -285,6 +289,10 @@ impl Server {
             Ev::Pane(PaneEvent::Mark { pane, kind, exit, line }) => {
                 self.history_mark(&pane, kind, exit, line);
                 self.job_mark(&pane, kind, exit, line);
+            }
+            Ev::Pane(PaneEvent::WebPane { pane, url }) => {
+                self.webs.insert(pane, url);
+                self.dirty = true;
             }
             Ev::Pane(PaneEvent::Keys { pane, msg }) => {
                 let c = self.claims.entry(pane).or_default();
@@ -641,6 +649,17 @@ impl Server {
 
     fn pane_gone(&mut self, pane: &str, code: i32) {
         self.panes.remove(pane);
+        // a web pane closed: its page goes too
+        if self.webs.remove(pane).is_some() {
+            let msg = format!("\x1b]7733;webclose;id={}\x07", pin_id(pane)).into_bytes();
+            let ids: Vec<u64> = self.clients.keys().copied().collect();
+            for c in ids {
+                if let Some(cl) = self.clients.get_mut(&c) {
+                    cl.last_pins.remove(&pin_id(pane));
+                }
+                self.send(c, &ServerMsg::Passthrough(msg.clone()));
+            }
+        }
         self.claims.remove(pane);
         let _ = std::fs::remove_file(paths::pane_socket(pane));
         self.ext.emit("pane_exit", &[("pane", pane.to_string()), ("status", code.to_string())]);
@@ -854,6 +873,7 @@ impl Server {
         }
         let title = self.panes.get(&w.focus).map(|p| p.title.lock().unwrap().clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| format!("zeit: {}", s.name));
         let modes = self.panes.get(&w.focus).map(|p| p.modes()).unwrap_or(0);
+        let focus_id = w.focus.clone();
         // only the rows that changed go out
         let c = self.clients.get_mut(&cid).unwrap();
         let full = c.last.len() != grid.len() || c.last.first().map(|r| r.len()) != grid.first().map(|r| r.len());
@@ -861,6 +881,28 @@ impl Server {
         c.last = grid;
         let frame = Frame { cols, rows, changed, cursor, cursor_shape: shape, title, modes };
         self.send(cid, &ServerMsg::Frame(frame));
+        // web panes: where the terminal (zash) draws each page; hidden ones it hides
+        let mut pins: HashMap<u32, (u16, u16, u16, u16, bool)> = HashMap::new();
+        let mut urls: HashMap<u32, String> = HashMap::new();
+        for (id, r) in &placed {
+            if let Some(url) = self.webs.get(id) {
+                pins.insert(pin_id(id), (r.x, r.y, r.w, r.h, *id == focus_id && overlay.is_none()));
+                urls.insert(pin_id(id), url.clone());
+            }
+        }
+        let old = self.clients.get_mut(&cid).map(|c| std::mem::replace(&mut c.last_pins, pins.clone())).unwrap_or_default();
+        let mut msg = String::new();
+        for (pid, p) in &pins {
+            if old.get(pid) != Some(p) {
+                msg.push_str(&format!("\x1b]7733;webrect;id={pid};x={};y={};w={};h={};focus={};url={}\x07", p.0, p.1, p.2, p.3, u8::from(p.4), urls[pid]));
+            }
+        }
+        for pid in old.keys().filter(|k| !pins.contains_key(k)) {
+            msg.push_str(&format!("\x1b]7733;webhide;id={pid}\x07"));
+        }
+        if !msg.is_empty() {
+            self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
+        }
         // job lines, for terminals that draw them small (zash); sent when they change
         let rows_msg = self.job_rows(&placed);
         if self.clients.get(&cid).is_some_and(|c| c.last_rows != rows_msg) {
@@ -1914,6 +1956,35 @@ impl Server {
                 let env = if envs.is_empty() { String::new() } else { format!("export {}; ", envs.join(" ")) };
                 let id = self.start_job(&origin, line, &place, size, cwd, env)?;
                 Ok(format!("routed {id}"))
+            }
+            "web" => {
+                // a pane that is a web page: a window of its own, or a split (-h right, -v below)
+                let p = ctx.clone().or(target.clone()).or_else(|| cid.and_then(|c| self.client_pane(c))).ok_or("no pane")?;
+                let typed = positional.join(" ");
+                if typed.trim().is_empty() {
+                    return Err("web [-h|-v] ADDRESS".into());
+                }
+                let url = web_address(&typed);
+                let exe = self.exe.display().to_string();
+                let cmd = vec![exe, "__webpane".into(), url.clone()];
+                let dir = self.panes.get(&p).map(|x| x.cwd()).unwrap_or_default();
+                let (sid, wi) = self.where_is(&p).ok_or("no pane")?;
+                let pane = self.start_pane(dir, cmd)?;
+                let s = self.session_mut(&sid).ok_or("no session")?;
+                if flag("-h") || flag("-v") {
+                    let w = &mut s.windows[wi];
+                    w.layout.split(&p, &pane, flag("-h"));
+                    w.focus = pane;
+                    w.zoom = false;
+                } else {
+                    let host = url.split("//").last().unwrap_or(&url).split('/').next().unwrap_or("web").trim_start_matches("www.").to_string();
+                    s.windows.push(Window { name: host, layout: Layout::Leaf(pane.clone()), focus: pane, zoom: false, named: true });
+                    s.last = s.active;
+                    s.active = s.windows.len() - 1;
+                }
+                self.layout_all();
+                self.save();
+                Ok(String::new())
             }
             "job-run" => {
                 // a job started by a program (zett's compile): no shell line, the bar and a note show it
@@ -3286,5 +3357,26 @@ impl Server {
                 }
             }
         }
+    }
+}
+
+/// The id a web pane has in the terminal's protocol (stable for the pane).
+fn pin_id(pane: &str) -> u32 {
+    let mut h: u32 = 2166136261;
+    for b in pane.bytes() {
+        h = (h ^ b as u32).wrapping_mul(16777619);
+    }
+    0x1000_0000 | (h & 0x0fff_ffff)
+}
+
+/// What a typed address means: a URL, a host, or a search (as zash reads it).
+fn web_address(s: &str) -> String {
+    let s = s.trim();
+    if s.contains("://") || s.starts_with("about:") || s.starts_with("file:") {
+        s.to_string()
+    } else if s.contains('.') && !s.contains(' ') {
+        format!("https://{s}")
+    } else {
+        format!("https://duckduckgo.com/?q={}", s.replace(' ', "+"))
     }
 }
