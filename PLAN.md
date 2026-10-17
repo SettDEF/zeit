@@ -354,6 +354,50 @@ boxed list in the grid, a notice a line in the status bar.
 - Soak: a day of output through 50 panes, memory flat, no lost bytes.
 - Restore: kill the server mid-work, restart, sessions back as they were.
 
+## Decide at the start (hard to change later)
+
+1. **Shells survive the server.** Each pane's pty is held by a tiny holder
+   process (`zeit-pane`), not by zeitd itself; the server gets the pty back by
+   fd passing. So a zeitd crash, or `zeit upgrade` to a new version, never
+   kills a shell. tmux cannot do this; it must be in the design from day one.
+2. **A versioned protocol** with a handshake and capabilities, from the first
+   message: old clients keep working with new servers and the other way round.
+3. **Stable ids.** Sessions, windows and panes get ids that survive restore
+   and reboot (and names on top), so scripts, zett links and the timeline keep
+   pointing at the right pane.
+4. **One idea of character width.** Server, zash and the text client use the
+   same Unicode width and grapheme tables (a shared crate); disagreeing about
+   emoji or CJK widths is the classic source of garbled multiplexer screens.
+5. **The timeline's storage format.** Append-only, per pane, compressed
+   chunks indexed by time and command; a retention limit (days, size); a
+   **private** flag per pane and patterns that are never kept (tokens,
+   passwords printed by tools); optional encryption at rest. Written once,
+   read for years: it must be versioned too.
+6. **Each pane in its own cgroup** (a systemd user scope, as Vitals does):
+   per-pane CPU and memory, freeze / thaw a pane, limits ("this build may use
+   4 cores"), and kill everything a pane started, including what escaped
+   into the background.
+7. **Idle means idle.** No timers while nothing changes (the laptop's
+   battery); status parts update on events, not every second.
+8. **Sizes with several clients.** A decision per session: follow the
+   latest client, the smallest, or let each client see its own size of the
+   same panes.
+9. **Security.** Socket directory 0700, no network listener ever; remote only
+   through SSH; sharing only by an explicit grant that shows while active;
+   OSC 52 clipboard writes from programs asked for or allowed per pane.
+10. **Environment.** What is refreshed on attach (SSH_AUTH_SOCK, DISPLAY,
+    WAYLAND_DISPLAY, …) and what a place keeps (its own variables, PATH
+    additions), decided once.
+11. **tmux compatibility as a promise.** The `zeit` verbs keep tmux's names;
+    a `tmux` shim maps scripts that call tmux onto zeit, so tools built for
+    tmux (vim-tmux-navigator, popups from scripts) keep working.
+12. **A recorder for tests from the first day.** Every byte into and out of
+    a pane can be recorded and replayed, so bugs come with a reproduction and
+    every release is checked against hours of real sessions.
+13. **Hooks into the desktop** planned, not bolted on: the zash UI protocol,
+    notifications, the shell's widgets (sessions in the bar, the AI panel),
+    zett links to panes and timeline moments, Vitals per pane.
+
 ## Decided
 
 - Name: **zeit** (2026-10-17).
