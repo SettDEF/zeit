@@ -37,6 +37,8 @@ struct State {
     prefix: Option<Chord>,
     maps: Vec<Map>,
     hooks: HashMap<String, Vec<RegistryKey>>,
+    /// z.rule functions: where a command runs
+    rules: Vec<RegistryKey>,
     /// zeit commands asked for by Lua, run by the server after the call
     queued: Vec<String>,
     notices: Vec<String>,
@@ -227,6 +229,30 @@ impl Ext {
         !self.st.borrow().no_tmux
     }
 
+    /// Where a command should run, by the z.rule functions (the first answer wins):
+    /// (`bottom`, `right`, `window`), and the size in percent when given.
+    pub fn route(&mut self, cmd: &str, cwd: &str) -> Option<(String, Option<u16>)> {
+        let fs: Vec<Function> = self.st.borrow().rules.iter().filter_map(|k| self.lua.registry_value(k).ok()).collect();
+        for f in fs {
+            let ctx = self.lua.create_table().ok()?;
+            let _ = ctx.set("cwd", cwd);
+            match f.call::<Value>((cmd, ctx)) {
+                Ok(Value::String(s)) => return Some((s.to_string_lossy(), None)),
+                Ok(Value::Table(t)) => {
+                    let place: String = t.get("where").unwrap_or_else(|_| "bottom".into());
+                    return Some((place, t.get::<u16>("size").ok()));
+                }
+                Ok(_) => {}
+                Err(e) => self.errors.push(format!("rule: {e}")),
+            }
+        }
+        None
+    }
+
+    pub fn has_rules(&self) -> bool {
+        !self.st.borrow().rules.is_empty()
+    }
+
     pub fn take_commands(&self) -> Vec<String> {
         std::mem::take(&mut self.st.borrow_mut().queued)
     }
@@ -295,6 +321,14 @@ impl Ext {
         let st = self.st.clone();
         z.set("cmd", lua.create_function(move |_, line: String| {
             st.borrow_mut().queued.push(line);
+            Ok(())
+        })?)?;
+
+        // z.rule(function(cmd, ctx) if cmd:match('^cargo') then return 'bottom' end end)
+        let st = self.st.clone();
+        z.set("rule", lua.create_function(move |lua, f: Function| {
+            let k = lua.create_registry_value(f)?;
+            st.borrow_mut().rules.push(k);
             Ok(())
         })?)?;
 

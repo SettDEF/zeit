@@ -21,6 +21,8 @@ enum Ev {
     Pane(PaneEvent),
     /// a line for the status line (run-shell output, errors from a thread)
     Notice(String),
+    /// a second passed while a job runs (its line shows the time)
+    Tick,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -99,6 +101,9 @@ pub struct Server {
     activity: HashSet<String>,
     /// the latest copy-mode search: text, and whether it went up
     last_search: Option<(String, bool)>,
+    /// commands z.rule sent to another pane
+    jobs: Vec<Job>,
+    ticking: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 type Reply = Result<String, String>;
@@ -138,7 +143,17 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, jobs: Vec::new(), ticking: Default::default() };
+    {
+        let (tick, tx) = (s.ticking.clone(), s.tx.clone());
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if tick.load(std::sync::atomic::Ordering::Relaxed) && tx.send(Ev::Tick).is_err() {
+                return;
+            }
+        });
+    }
+    s.rules_flag();
     s.restore();
     loop {
         let Ok(ev) = rx.recv() else { break };
@@ -244,6 +259,21 @@ impl Server {
                 self.dirty = true;
             }
             Ev::Notice(text) => self.notice_all(text),
+            Ev::Tick => {
+                let running: Vec<String> = self.jobs.iter().filter(|j| j.end.is_none()).map(|j| j.id.clone()).collect();
+                for id in running {
+                    self.paint_job(&id);
+                }
+                self.dirty = true;
+            }
+            Ev::Pane(PaneEvent::Mark { pane, kind, exit, line }) => self.job_mark(&pane, kind, exit, line),
+            Ev::Pane(PaneEvent::JobLine { pane: _, job, line }) => {
+                if let Some(j) = self.jobs.iter_mut().find(|j| j.id == job) {
+                    j.line = Some(line);
+                }
+                self.paint_job(&job);
+                self.dirty = true;
+            }
             Ev::Pane(PaneEvent::Passthrough(pane, seq)) => {
                 // to the clients showing that pane in front
                 let ids: Vec<u64> = self.clients.keys().copied().filter(|c| self.client_pane(*c).as_deref() == Some(pane.as_str())).collect();
@@ -441,10 +471,15 @@ impl Server {
         let (cx, cy) = (x.saturating_sub(1), y.saturating_sub(1));
         let placed = if w.zoom { vec![(w.focus.clone(), area)] } else { w.layout.place(area).0 };
         let Some((pane, r)) = placed.into_iter().find(|(_, r)| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h) else { return };
+        let focus = w.focus.clone();
         let wheel = b & 64 != 0;
         let motion = b & 32 != 0;
+        // a click on a job's line unfolds it
+        if press && !wheel && !motion && b & 3 == 0 && self.click_job(&pane, cy - r.y) {
+            return;
+        }
         // a click in another pane gives it the keyboard
-        if press && !wheel && !motion && pane != w.focus {
+        if press && !wheel && !motion && pane != focus {
             if let Some(s) = self.session_mut(&sid) {
                 let w = &mut s.windows[s.active];
                 w.focus = pane.clone();
@@ -671,6 +706,13 @@ impl Server {
             if *id == w.focus {
                 cursor = cur.map(|(x, y)| (r.x + x, r.y + y));
                 shape = sh;
+            }
+        }
+        for (id, r) in &placed {
+            let covered = self.draw_folds(&mut grid, id, *r);
+            // an unfolded job covers the prompt: no cursor showing through it
+            if cursor.is_some_and(|(cx, cy)| covered.contains(&(cy as usize)) && cx >= r.x && cx < r.x + r.w) {
+                cursor = None;
             }
         }
         // copy mode: its cursor, and where in the history it is (as tmux shows it)
@@ -1105,6 +1147,7 @@ impl Server {
                 self.keys = build_keys(&ext);
                 self.look = Look::from(&self.keys.opts);
                 self.ext = ext;
+                self.rules_flag();
                 self.layout_all();
                 Ok(format!("config reloaded ({n} plugins)"))
             }
@@ -1258,6 +1301,11 @@ fn build_keys(ext: &Ext) -> Keys {
 /// `tmux` inside zeit is zeit: a tmux → zeit link first in PATH, so bindings and
 /// scripts that call `tmux show-buffer` or `tmux kill-window` keep working.
 fn tmux_shim(exe: &std::path::Path) {
+    // the zsh integration (see shell/zshenv), with this zeit's paths in it
+    let zdot = paths::runtime_dir().join("zsh");
+    let _ = std::fs::create_dir_all(&zdot);
+    let script = include_str!("../shell/zshenv").replace("@ZEIT@", &exe.display().to_string()).replace("@RULES@", &paths::runtime_dir().join("has-rules").display().to_string());
+    let _ = std::fs::write(zdot.join(".zshenv"), script);
     let bin = paths::runtime_dir().join("bin");
     let _ = std::fs::create_dir_all(&bin);
     let link = bin.join("tmux");
@@ -1748,6 +1796,31 @@ impl Server {
                 self.save();
                 Ok(String::new())
             }
+            "__route" => {
+                // the shell asks before running a command: does a rule send it elsewhere?
+                let origin = ctx.clone().ok_or("__route: only from a zeit pane")?;
+                // a run pane runs what it is given: its commands go nowhere else
+                if self.jobs.iter().any(|j| j.run.as_deref() == Some(origin.as_str())) {
+                    return Ok(String::new());
+                }
+                let line = args.iter().skip_while(|a| *a != "--").skip(1).cloned().collect::<Vec<_>>().join(" ");
+                let cwd = self.panes.get(&origin).map(|p| p.cwd()).unwrap_or_default();
+                let Some((place, size)) = self.ext.route(&line, &cwd.display().to_string()) else { return Ok(String::new()) };
+                if place == "here" {
+                    return Ok(String::new());
+                }
+                let id = self.start_job(&origin, line, &place, size, cwd)?;
+                Ok(format!("routed {id}"))
+            }
+            "job-toggle" => {
+                let p = target.or(ctx).ok_or("no pane")?;
+                let j = self.jobs.iter_mut().rev().find(|j| j.origin == p && j.line.is_some()).ok_or("no job line in this pane")?;
+                j.open = !j.open;
+                let id = j.id.clone();
+                self.paint_job(&id);
+                Ok(String::new())
+            }
+            "jobs" => Ok(self.jobs.iter().map(|j| format!("{}  {}  {}", j.id, j.status_text(), j.cmd)).collect::<Vec<_>>().join("\n")),
             "__keys" => {
                 // for the client: which keys are zeit's, and which repeat
                 let name = |c: &Chord| format!("{}{}{}", if c.ctrl { "C-" } else { "" }, if c.alt { "M-" } else { "" }, c.key);
@@ -2327,4 +2400,226 @@ impl Server {
             }
         }
     }
+}
+
+/// A command a rule sent to another pane, and the line it left in its own.
+#[derive(Clone, Debug)]
+struct Job {
+    id: String,
+    /// the pane it was typed in
+    origin: String,
+    cmd: String,
+    /// the pane it runs in
+    run: Option<String>,
+    /// its line in the origin pane (counted as Pane::abs_line counts)
+    line: Option<i64>,
+    start: std::time::Instant,
+    end: Option<(std::time::Duration, i32)>,
+    /// where its output starts and ends in the run pane
+    out: Option<(i64, Option<i64>)>,
+    sent: bool,
+    /// unfolded under its line
+    open: bool,
+    /// the output once it ended (the run pane may close)
+    kept: Vec<String>,
+}
+
+fn duration(d: std::time::Duration, tenths: bool) -> String {
+    let s = d.as_secs_f64();
+    if s < 60.0 {
+        if tenths { format!("{s:.1}s") } else { format!("{}s", s as u64) }
+    } else {
+        format!("{}m {:02}s", s as u64 / 60, s as u64 % 60)
+    }
+}
+
+impl Job {
+    fn status_text(&self) -> String {
+        match self.end {
+            None => format!("⟳ {}", duration(self.start.elapsed(), false)),
+            Some((d, 0)) => format!("✓ {}", duration(d, true)),
+            Some((d, code)) => format!("✗ {code} · {}", duration(d, true)),
+        }
+    }
+}
+
+impl Server {
+    /// The shells look for this file before asking zeit about each command.
+    fn rules_flag(&self) {
+        let f = paths::runtime_dir().join("has-rules");
+        if self.ext.has_rules() {
+            let _ = std::fs::write(&f, "");
+        } else {
+            let _ = std::fs::remove_file(&f);
+        }
+    }
+
+    fn start_job(&mut self, origin: &str, cmd: String, place: &str, size: Option<u16>, cwd: PathBuf) -> Result<String, String> {
+        // the origin's run pane again, when its last job is done
+        let busy = |s: &Server, r: &str| s.jobs.iter().any(|j| j.run.as_deref() == Some(r) && j.end.is_none());
+        let reuse = self.jobs.iter().rev().find(|j| j.origin == origin && j.run.as_ref().is_some_and(|r| self.panes.contains_key(r))).and_then(|j| j.run.clone()).filter(|r| !busy(self, r));
+        let (run, fresh) = match reuse {
+            Some(r) => (r, false),
+            None => {
+                let (sid, wi) = self.where_is(origin).ok_or("no pane")?;
+                let pane = self.start_pane(cwd.clone(), Vec::new())?;
+                let share = 1.0 - f32::from(size.unwrap_or(30)) / 100.0;
+                let s = self.session_mut(&sid).ok_or("no session")?;
+                match place {
+                    "window" => {
+                        let name: String = cmd.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+                        s.windows.push(Window { name, layout: Layout::Leaf(pane.clone()), focus: pane.clone(), zoom: false, named: true });
+                    }
+                    side => {
+                        let w = &mut s.windows[wi];
+                        w.layout.split(origin, &pane, side == "right");
+                        w.layout.set_ratio_of(&pane, share);
+                    }
+                }
+                self.layout_all();
+                self.save();
+                (pane, true)
+            }
+        };
+        let id = paths::new_id("j");
+        let line = if fresh { cmd.clone() } else { format!("cd {} && {cmd}", shell_quote(&cwd.display().to_string())) };
+        if let Some(p) = self.panes.get(&run) {
+            // typed ahead: the new shell reads it once its prompt is up
+            p.input(format!("{line}\r").as_bytes());
+        }
+        self.jobs.push(Job { id: id.clone(), origin: origin.to_string(), cmd, run: Some(run), line: None, start: std::time::Instant::now(), end: None, out: None, sent: true, open: false, kept: Vec::new() });
+        // a long list of old jobs is not needed
+        if self.jobs.len() > 200 {
+            self.jobs.remove(0);
+        }
+        self.ticking.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(id)
+    }
+
+    /// A shell mark from a pane: a job in it started its output, or ended.
+    fn job_mark(&mut self, pane: &str, kind: char, exit: Option<i32>, line: i64) {
+        let Some(j) = self.jobs.iter_mut().find(|j| j.run.as_deref() == Some(pane) && j.end.is_none() && j.sent) else { return };
+        match kind {
+            'C' if j.out.is_none() => j.out = Some((line, None)),
+            'D' if j.out.is_some() => {
+                let from = j.out.unwrap().0;
+                j.out = Some((from, Some(line)));
+                j.end = Some((j.start.elapsed(), exit.unwrap_or(0)));
+                let id = j.id.clone();
+                if let Some(p) = self.panes.get(pane) {
+                    let mut rows = p.rows_text(from, line);
+                    while rows.last().is_some_and(|r| r.is_empty()) {
+                        rows.pop();
+                    }
+                    let skip = rows.len().saturating_sub(2000);
+                    let kept = rows.split_off(skip);
+                    if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
+                        j.kept = kept;
+                    }
+                }
+                let ok = exit.unwrap_or(0) == 0;
+                self.ext.emit("job_done", &[("cmd", self.jobs.iter().find(|j| j.id == id).map(|j| j.cmd.clone()).unwrap_or_default()), ("status", exit.unwrap_or(0).to_string())]);
+                self.paint_job(&id);
+                if !ok {
+                    let cmd = self.jobs.iter().find(|j| j.id == id).map(|j| j.cmd.clone()).unwrap_or_default();
+                    self.notice_all(format!("✗ {cmd}"));
+                }
+                if !self.jobs.iter().any(|j| j.end.is_none()) {
+                    self.ticking.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                self.dirty = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Draws a job's line into its origin pane: ▸ and the command on the left, the status right.
+    fn paint_job(&mut self, id: &str) {
+        use alacritty_terminal::vte::ansi::NamedColor;
+        let Some(j) = self.jobs.iter().find(|j| j.id == id) else { return };
+        let (Some(line), Some(p)) = (j.line, self.panes.get(&j.origin)) else { return };
+        let cols = p.cols as usize;
+        let status = j.status_text();
+        let color = match j.end {
+            None => NamedColor::Yellow,
+            Some((_, 0)) => NamedColor::Green,
+            Some(_) => NamedColor::Red,
+        };
+        let where_ = if j.run.as_ref().is_some_and(|r| self.panes.contains_key(r)) { "" } else { " (pane closed)" };
+        let right = format!("{status}{where_}");
+        let rlen = right.chars().count();
+        let room = cols.saturating_sub(rlen + 4);
+        let mut cmd: String = j.cmd.chars().take(room).collect();
+        if j.cmd.chars().count() > room && room > 1 {
+            cmd.pop();
+            cmd.push('…');
+        }
+        let pieces = vec![
+            (0, if j.open { "▾".to_string() } else { "▸".to_string() }, Some(NamedColor::Blue), true),
+            (2, cmd, None, false),
+            (cols.saturating_sub(rlen), right, Some(color), false),
+        ];
+        p.write_row(line, &pieces);
+        self.dirty = true;
+    }
+
+    /// The unfolded output under the open job lines of a pane on screen.
+    fn draw_folds(&self, grid: &mut [Vec<Cell>], pane: &str, r: Rect) -> Vec<usize> {
+        let mut covered = Vec::new();
+        let Some(p) = self.panes.get(pane) else { return covered };
+        let (hist, d) = {
+            let t = p.term.lock();
+            (t.grid().history_size() as i64, t.grid().display_offset() as i64)
+        };
+        for j in self.jobs.iter().filter(|j| j.origin == pane && j.open) {
+            let Some(line) = j.line else { continue };
+            let vy = line - hist + d;
+            if vy < 0 || vy >= i64::from(r.h) - 1 {
+                continue;
+            }
+            let rows: Vec<String> = if j.end.is_some() {
+                j.kept.clone()
+            } else {
+                match (j.run.as_ref().and_then(|x| self.panes.get(x)), j.out) {
+                    (Some(rp), Some((from, _))) => rp.rows_text(from, rp.abs_line() + 1),
+                    _ => Vec::new(),
+                }
+            };
+            let room = (i64::from(r.h) - vy - 1).min(14) as usize;
+            let mut shown: Vec<String> = if rows.is_empty() { vec!["(no output yet)".into()] } else { rows };
+            if shown.len() > room {
+                let more = shown.len() - room + 1;
+                shown = std::iter::once(format!("… {more} lines above")).chain(shown[shown.len() - room + 1..].iter().cloned()).collect();
+            }
+            for (i, text) in shown.iter().enumerate() {
+                let y = r.y as usize + vy as usize + 1 + i;
+                covered.push(y);
+                let x = r.x as usize;
+                let w = r.w as usize;
+                write_text(grid, y, x, &" ".repeat(w), Color::Default, self.look.pill, 0);
+                write_text(grid, y, x, "│ ", self.look.primary, self.look.pill, 0);
+                let t: String = text.chars().take(w.saturating_sub(2)).collect();
+                write_text(grid, y, x + 2, &t, if i == 0 && text.starts_with('…') { self.look.muted } else { Color::Default }, self.look.pill, 0);
+            }
+        }
+        covered
+    }
+
+    /// A click on a job's line folds or unfolds it; true when it was one.
+    fn click_job(&mut self, pane: &str, row: u16) -> bool {
+        let Some(p) = self.panes.get(pane) else { return false };
+        let (hist, d) = {
+            let t = p.term.lock();
+            (t.grid().history_size() as i64, t.grid().display_offset() as i64)
+        };
+        let Some(j) = self.jobs.iter_mut().find(|j| j.origin == pane && j.line.is_some_and(|l| l - hist + d == i64::from(row))) else { return false };
+        j.open = !j.open;
+        let id = j.id.clone();
+        self.paint_job(&id);
+        true
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }

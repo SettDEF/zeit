@@ -134,3 +134,12 @@ P('C-M-p', [[command-prompt -p "Swap current pane to? (e.g. 2)" "swap-pane -t '%
 P('C-p', [[choose-tree -Zw "move-pane -t '%%'"]])
 P('M-p', [[command-prompt -p "Move current pane to? (e.g. 3)" "move-pane -t '%%'"]])
 P('!', 'break-pane')
+
+-- commands that run in another pane, leaving a line here:
+-- ▸ the command … ✓ 3.2s; a click on it (or prefix Enter) unfolds the output
+z.rule(function(cmd)
+  for _, p in ipairs { '^cargo%s+build', '^cargo%s+test', '^cargo%s+check', '^cargo%s+clippy', '^make%f[%s]', '^make$' } do
+    if cmd:match(p) then return { where = 'bottom', size = 30 } end
+  end
+end)
+P('Enter', 'job-toggle')

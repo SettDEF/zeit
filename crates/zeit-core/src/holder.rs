@@ -45,6 +45,17 @@ fn spawn(id: &str, cwd: &Path, cols: u16, rows: u16, cmd: &[String]) -> std::io:
     for v in FOREIGN {
         unsafe { std::env::remove_var(v) };
     }
+    // zsh gets zeit's integration first (shell/zshenv), which hands ZDOTDIR back
+    let zdot = crate::paths::runtime_dir().join("zsh");
+    if argv[0].ends_with("zsh") && zdot.join(".zshenv").is_file() {
+        unsafe {
+            match std::env::var_os("ZDOTDIR") {
+                Some(d) => std::env::set_var("ZEIT_ORIG_ZDOTDIR", d),
+                None => std::env::remove_var("ZEIT_ORIG_ZDOTDIR"),
+            }
+            std::env::set_var("ZDOTDIR", &zdot);
+        }
+    }
     unsafe {
         std::env::set_var("ZEIT", "1");
         std::env::set_var("ZEIT_PANE", id);

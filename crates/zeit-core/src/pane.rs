@@ -19,6 +19,10 @@ pub enum PaneEvent {
     Output(String),
     /// an OSC 7733 message (zash's UI protocol) for the terminal the pane is shown in
     Passthrough(String, Vec<u8>),
+    /// a shell mark (OSC 133: A prompt, C output starts, D done) and the line it came at
+    Mark { pane: String, kind: char, exit: Option<i32>, line: i64 },
+    /// the shell printed a job's line (OSC 7733;job;ID) here
+    JobLine { pane: String, job: String, line: i64 },
     Exited(String, i32),
     /// the holder vanished without saying the shell ended
     Lost(String),
@@ -193,6 +197,58 @@ impl Pane {
         self.term.lock().grid_mut().clear_history();
     }
 
+    /// The line the cursor is on, counted from the oldest line kept.
+    pub fn abs_line(&self) -> i64 {
+        let t = self.term.lock();
+        t.grid().history_size() as i64 + t.grid().cursor.point.line.0 as i64
+    }
+
+    /// Rows `from..to` (counted as abs_line counts) as text.
+    pub fn rows_text(&self, from: i64, to: i64) -> Vec<String> {
+        let t = self.term.lock();
+        let hist = t.grid().history_size() as i64;
+        let rows = t.screen_lines() as i64;
+        let cols = t.columns();
+        (from.max(0)..to.min(hist + rows))
+            .map(|a| {
+                let row = &t.grid()[Line((a - hist) as i32)];
+                (0..cols).map(|x| row[Column(x)].c).collect::<String>().trim_end().to_string()
+            })
+            .collect()
+    }
+
+    /// Writes over row `abs` (a job's line): (text, colour, bold) pieces, the rest cleared.
+    pub fn write_row(&self, abs: i64, pieces: &[(usize, String, Option<NamedColor>, bool)]) -> bool {
+        use alacritty_terminal::term::cell::Cell as ACell;
+        let mut t = self.term.lock();
+        let hist = t.grid().history_size() as i64;
+        let rows = t.screen_lines() as i64;
+        if abs < 0 || abs >= hist + rows {
+            return false;
+        }
+        let cols = t.columns();
+        let row = &mut t.grid_mut()[Line((abs - hist) as i32)];
+        for x in 0..cols {
+            row[Column(x)] = ACell::default();
+        }
+        for (at, text, color, bold) in pieces {
+            for (i, ch) in text.chars().enumerate() {
+                if at + i >= cols {
+                    break;
+                }
+                let c = &mut row[Column(at + i)];
+                c.c = ch;
+                if let Some(n) = color {
+                    c.fg = AColor::Named(*n);
+                }
+                if *bold {
+                    c.flags.insert(Flags::BOLD);
+                }
+            }
+        }
+        true
+    }
+
     /// The screen as plain text (capture-pane).
     pub fn text(&self) -> String {
         let (rows, _, _) = self.screen();
@@ -226,7 +282,20 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
                 for seq in passthrough(&bytes) {
                     let _ = events.send(PaneEvent::Passthrough(id.clone(), seq));
                 }
-                parser.advance(&mut *term.lock(), &bytes);
+                // marks and job lines: the bytes up to each go in first, so its line is known
+                let mut last = 0;
+                for (end, what) in places(&bytes) {
+                    let mut t = term.lock();
+                    parser.advance(&mut *t, &bytes[last..end]);
+                    last = end;
+                    let line = t.grid().history_size() as i64 + t.grid().cursor.point.line.0 as i64;
+                    drop(t);
+                    let _ = events.send(match what {
+                        Place::Mark(kind, exit) => PaneEvent::Mark { pane: id.clone(), kind, exit, line },
+                        Place::Job(job) => PaneEvent::JobLine { pane: id.clone(), job, line },
+                    });
+                }
+                parser.advance(&mut *term.lock(), &bytes[last..]);
                 if events.send(PaneEvent::Output(id.clone())).is_err() {
                     return;
                 }
@@ -257,10 +326,38 @@ fn passthrough(chunk: &[u8]) -> Vec<Vec<u8>> {
         let start = i + p;
         let Some(end) = chunk[start..].iter().position(|&b| b == 0x07).map(|e| start + e + 1) else { break };
         // popups only: Neovim mode (7733;nvim) belongs to the pane, not to the outer window
-        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") {
+        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") {
             out.push(chunk[start..end].to_vec());
         }
         i = end;
+    }
+    out
+}
+
+enum Place {
+    Mark(char, Option<i32>),
+    Job(String),
+}
+
+/// Where in a chunk the shell marks (OSC 133) and job lines (OSC 7733;job;ID) end.
+fn places(chunk: &[u8]) -> Vec<(usize, Place)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(p) = chunk[i..].windows(2).position(|w| w == b"\x1b]") {
+        let start = i + p + 2;
+        let Some(len) = chunk[start..].iter().position(|&b| b == 0x07 || b == 0x1b) else { break };
+        let body = String::from_utf8_lossy(&chunk[start..start + len]).to_string();
+        let end = start + len + if chunk[start + len] == 0x1b { 2 } else { 1 };
+        if let Some(rest) = body.strip_prefix("133;") {
+            let mut parts = rest.split(';');
+            if let Some(kind) = parts.next().and_then(|k| k.chars().next()) {
+                let exit = if kind == 'D' { parts.next().and_then(|v| v.parse().ok()) } else { None };
+                out.push((end.min(chunk.len()), Place::Mark(kind, exit)));
+            }
+        } else if let Some(job) = body.strip_prefix("7733;job;") {
+            out.push((end.min(chunk.len()), Place::Job(job.to_string())));
+        }
+        i = end.min(chunk.len());
     }
     out
 }

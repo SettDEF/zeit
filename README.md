@@ -16,6 +16,13 @@ A terminal multiplexer: your shells keep running, and remember.
 - **tmux's commands, scripting included:** `\;` chains, `if-shell`, `run-shell`,
   formats (`#{pane_current_path}`), buffers, vi copy mode; inside zeit, `tmux`
   is zeit, so scripts written for tmux keep working.
+- **Command rules:** `z.rule(function(cmd) if cmd:match('^cargo build') then
+  return 'bottom' end end)` sends a command to another pane (`bottom`, `right`,
+  `window`, with an optional `size`). Your pane keeps one line for it, the
+  command on the left and its status on the right (`⟳ 4s`, `✓ 3.2s`,
+  `✗ 101 · 3.2s`). A click on it, or `job-toggle`, unfolds the output under
+  it. zsh learns this from zeit's own small integration (shell marks and the
+  Enter hand-off); your ZDOTDIR and rc files are left as they are.
 - **Upgrades without losing anything:** `zeit restart-server` starts the new
   binary; shells keep running and attached windows reconnect.
 - **A timeline** of every pane's commands, recorded from the start.
