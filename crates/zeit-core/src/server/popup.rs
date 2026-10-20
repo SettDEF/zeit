@@ -7,6 +7,10 @@ use super::*;
 /// flush with that side whatever the screen's size.
 const EDGE: i16 = 10_000;
 
+/// The frame's buttons (" ⌄ – ×") start this many cells from its right edge: the × sits next to
+/// the corner. zash draws them at the same place (render.rs, ZFLOAT_BUTTONS), so clicks land.
+const BUTTONS_FROM_RIGHT: u16 = 7;
+
 /// Cells from an edge that still count as at it, when a dragged zfloat is let go.
 const SNAP: i16 = 2;
 
@@ -419,9 +423,9 @@ impl Server {
         let title = opts.title.clone().unwrap_or_else(|| p.name.clone());
         write_text(grid, outer.y as usize, outer.x as usize + 2, &format!(" {}{} ", title, if below { " · prefix Tab: up" } else { "" }), tf, tb, zeit_proto::BOLD);
         // the buttons on the right of the frame: presets ⌄, hide –, close ×
-        let bx = (outer.x + outer.w).saturating_sub(9);
+        let bx = (outer.x + outer.w).saturating_sub(BUTTONS_FROM_RIGHT);
         if opts.buttons.unwrap_or(true) {
-            write_text(grid, outer.y as usize, bx as usize, " ⌄ – × ", fg, Color::Default, zeit_proto::BOLD);
+            write_text(grid, outer.y as usize, bx as usize, " ⌄ – ×", fg, Color::Default, zeit_proto::BOLD);
         }
         if !others.is_empty() {
             let more = format!(" {} ", others.join(" · "));
@@ -513,7 +517,7 @@ impl Server {
         let (outer, inner) = self.popup_rect(&p);
         // the frame's buttons (when it has them)
         if cy == outer.y && self.ext.zfloat_opts(&p.name).buttons.unwrap_or(true) {
-            let bx = (outer.x + outer.w).saturating_sub(9);
+            let bx = (outer.x + outer.w).saturating_sub(BUTTONS_FROM_RIGHT);
             let what = match cx.checked_sub(bx) {
                 // two cells each: the terminal may draw them up to a cell further right (flush with its edge)
                 Some(1 | 2) => Some("menu"),
