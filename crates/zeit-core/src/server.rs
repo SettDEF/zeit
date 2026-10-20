@@ -1064,7 +1064,9 @@ impl Server {
                 // its own title and whether it has buttons (z.zfloat), for zash's frame
                 let opts = self.ext.zfloat_opts(&p.name);
                 let title = opts.title.clone().unwrap_or_else(|| p.name.clone());
-                format!("\x1b]7733;zfloat;id={};x={};y={};w={};h={};focus={};buttons={};title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), u8::from(opts.buttons.unwrap_or(true)), title.replace([';', '\x07', '\x1b'], " "))
+                // the panel in zeit's pill colour (the tab pills'), so both follow the theme together
+                let bg = match self.look.pill { Color::Rgb(r, g, b) => format!("bg={r:02x}{g:02x}{b:02x};"), _ => String::new() };
+                format!("\x1b]7733;zfloat;id={};x={};y={};w={};h={};focus={};buttons={};{bg}title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), u8::from(opts.buttons.unwrap_or(true)), title.replace([';', '\x07', '\x1b'], " "))
             }
             None => String::new(),
         };
