@@ -196,7 +196,11 @@ pub fn start(exe: &Path, id: &str, cwd: &Path, cols: u16, rows: u16, cmd: &[Stri
             Ok(())
         });
     }
-    c.spawn()?;
+    let mut child = c.spawn()?;
+    // collected when the pane ends: dropped unwaited, every closed pane left a zombie under the server
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     // its socket appears in a moment
     for _ in 0..200 {
         if sock.exists() {
