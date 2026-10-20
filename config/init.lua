@@ -16,6 +16,8 @@ z.set('pane-border-style', 'fg=blue')
 z.set('pane-active-border-style', 'fg=green')
 z.set('history-limit', 20000)
 z.set('monitor-activity', 'on')
+-- cells kept blank at the status line's right end (window buttons a compositor floats there)
+-- z.set('status-right-gap', 8)
 
 -- the wallpaper's colours: tinct writes them for tmux, zeit reads the same file
 local f = io.open(os.getenv('HOME') .. '/.config/tmux/tinct_colors.conf')
@@ -107,7 +109,7 @@ local C = function(key, cmd) z.map('<copy>' .. key, cmd) end
 C('v', 'send-keys -X begin-selection')
 C('V', 'send-keys -X select-line')
 C('C-v', 'send-keys -X rectangle-toggle')
-C('y', 'send-keys -X copy-pipe "~/.scripts/tmux-clip-write"')
+C('y', 'send-keys -X copy-pipe "~/.scripts/apps/tmux/tmux-clip-write"')
 local search = function(key, name, cmd)
   C(key, "send-keys -X copy-selection \\; new-window -n " .. name ..
     " \\; send-keys -t " .. name .. " '" .. cmd .. " \"$(tmux show-buffer)\" && tmux kill-window' Enter")

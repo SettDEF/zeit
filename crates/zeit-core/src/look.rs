@@ -22,6 +22,9 @@ pub struct Look {
     pub left_icon: String,
     pub history: usize,
     pub activity_on: bool,
+    /// cells kept blank at the status line's right end (`status-right-gap`): room for the
+    /// window buttons a compositor floats there (ii-decor's overlay)
+    pub right_gap: usize,
 }
 
 /// A tmux colour: `#rrggbb`, `colour123`, `blue`, `brightred`, `default`.
@@ -73,6 +76,7 @@ impl Look {
             left_icon: opt("@left_icon").unwrap_or("\u{f2d0}").to_string(),
             history: opt("history-limit").and_then(|v| v.parse().ok()).unwrap_or(10_000),
             activity_on: matches!(opt("monitor-activity"), Some("on" | "true" | "1")),
+            right_gap: opt("status-right-gap").and_then(|v| v.parse().ok()).unwrap_or(0),
         }
     }
 

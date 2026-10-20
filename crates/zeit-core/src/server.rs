@@ -993,7 +993,7 @@ impl Server {
             write_text(&mut grid, status_row, x, &label, fg, bg, fl);
             x += label.chars().count();
         }
-        let rx = (cols as usize).saturating_sub(right.chars().count());
+        let rx = (cols as usize).saturating_sub(right.chars().count() + self.look.right_gap);
         write_text(&mut grid, status_row, rx.max(x), &right, Color::Indexed(0), Color::Indexed(2), 0);
         }
         if self.ext.enabled("hintbar") && rows >= 2 {
@@ -2522,7 +2522,7 @@ impl Server {
             };
             x = pill(grid, x, &text, fg, bg, fl) + 2;
         }
-        let rx = cols.saturating_sub(right.chars().count());
+        let rx = cols.saturating_sub(right.chars().count() + l.right_gap);
         write_text(grid, row, rx.max(x), right, l.muted, l.status_bg, 0);
     }
 }
