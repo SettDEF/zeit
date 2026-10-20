@@ -107,6 +107,10 @@ pub struct Server {
     /// the size panes are laid out for (the latest client's)
     size: (u16, u16),
     dirty: bool,
+    /// the earliest the next frame may go out: a flood of output is drawn at most every FRAME, not
+    /// once per chunk read (that made bulk output ~5x slower than zash alone); after a pause the
+    /// next frame goes at once, so typing is not delayed
+    next_frame: std::time::Instant,
     /// passthrough sequences for a client, sent after its next frame (so the cursor is right)
     pending: HashMap<u64, Vec<Vec<u8>>>,
     /// the start of a mouse report whose end has not arrived yet
@@ -151,6 +155,9 @@ pub struct Server {
 type Reply = Result<String, String>;
 
 /// Runs the server until its last session ends.
+/// The shortest time between two frames to a client while output streams (125 per second).
+const FRAME: std::time::Duration = std::time::Duration::from_millis(8);
+
 pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     paths::private_dir(&paths::runtime_dir())?;
     tmux_shim(&exe);
@@ -185,7 +192,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), floats: Vec::new(), float_focus: HashMap::new(), float_drags: HashMap::new() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), floats: Vec::new(), float_focus: HashMap::new(), float_drags: HashMap::new() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -231,14 +238,30 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     s.apply_zfloat_opts();
     s.restore_floats();
     loop {
-        let Ok(ev) = rx.recv() else { break };
-        s.handle(ev);
-        while let Ok(ev) = rx.try_recv() {
+        // a frame held back by the cap is due at next_frame: wait for events only until then
+        let ev = if s.dirty {
+            match rx.recv_timeout(s.next_frame.saturating_duration_since(std::time::Instant::now())) {
+                Ok(ev) => Some(ev),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(ev) => Some(ev),
+                Err(_) => break,
+            }
+        };
+        let woke = ev.is_some();
+        if let Some(ev) = ev {
             s.handle(ev);
+            while let Ok(ev) = rx.try_recv() {
+                s.handle(ev);
+            }
         }
         s.after();
-        // tmux's rule: the server ends with its last session
-        if s.sessions.is_empty() && s.clients.is_empty() {
+        // tmux's rule: the server ends with its last session (judged after an event, as before the
+        // frame cap: a frame due at startup must not end a server nobody has reached yet)
+        if woke && s.sessions.is_empty() && s.clients.is_empty() {
             break;
         }
     }
@@ -498,8 +521,10 @@ impl Server {
         for p in seen {
             self.activity.remove(&p);
         }
-        if self.dirty {
+        let now = std::time::Instant::now();
+        if self.dirty && now >= self.next_frame {
             self.dirty = false;
+            self.next_frame = now + FRAME;
             let ids: Vec<u64> = self.clients.keys().copied().collect();
             for id in ids {
                 self.draw(id);
