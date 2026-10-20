@@ -7,6 +7,32 @@ use super::*;
 /// flush with that side whatever the screen's size.
 const EDGE: i16 = 10_000;
 
+/// Cells from an edge that still count as at it, when a dragged zfloat is let go.
+const SNAP: i16 = 2;
+
+/// How far a zfloat of `size` can move from the middle of `total` cells, left and right (or up
+/// and down). The middle is `(total - size) / 2` rounded down, as popup_rect places it, so an
+/// odd spare puts the extra cell on the right: docked right is then flush, not a cell short.
+fn span(total: u16, size: u16) -> (i16, i16) {
+    let spare = total.saturating_sub(size) as i16;
+    let mid = spare / 2;
+    (-mid, spare - mid)
+}
+
+/// An offset from the middle, docked (EDGE) when it ends within SNAP cells of either limit.
+fn snap(off: i16, (lo, hi): (i16, i16)) -> i16 {
+    if hi - lo <= 2 * SNAP {
+        return off; // nearly as wide as the screen: no room to tell docked from not
+    }
+    if off >= hi - SNAP {
+        EDGE
+    } else if off <= lo + SNAP {
+        -EDGE
+    } else {
+        off
+    }
+}
+
 /// The offsets of a side (right, top-left …): pinned to those edges.
 fn pinned(side: &str) -> (i16, i16) {
     let dx = if side.contains("left") { -EDGE } else if side.contains("right") { EDGE } else { 0 };
@@ -53,12 +79,26 @@ impl Server {
         (w.max(10).min(area.w), h.max(4).min(area.h))
     }
 
+    /// A zfloat dropped next to an edge docks there again (it stays flush when the screen
+    /// changes size); a click on its frame that moved it a cell must not unpin it for good.
+    fn dock_dropped(&mut self, sid: &str) {
+        let shown = self.popup_shown.get(sid).cloned();
+        let Some(p) = self.popups.get(sid).and_then(|l| l.iter().find(|p| Some(&p.pane) == shown.as_ref())).cloned() else { return };
+        let area = self.area();
+        let (w, h) = self.popup_size(&p);
+        let (dx, dy) = (snap(p.dx, span(area.w, w)), snap(p.dy, span(area.h, h)));
+        if let Some(q) = self.popups.get_mut(sid).and_then(|l| l.iter_mut().find(|q| q.pane == p.pane)) {
+            (q.dx, q.dy) = (dx, dy);
+            (q.ax, q.ay) = (dx as f32, dy as f32);
+        }
+    }
+
     /// Where a zfloat really is, as an offset from the middle (a pinned one: at its edge).
     pub(super) fn real_offset(&self, p: &Popup) -> (i16, i16) {
         let area = self.area();
         let (w, h) = self.popup_size(p);
-        let (ex, ey) = (((area.w - w) / 2) as i16, ((area.h - h) / 2) as i16);
-        (p.dx.clamp(-ex, ex), p.dy.clamp(-ey, ey))
+        let ((lx, hx), (ly, hy)) = (span(area.w, w), span(area.h, h));
+        (p.dx.clamp(lx, hx), p.dy.clamp(ly, hy))
     }
 
     pub(super) fn popup_rect(&self, p: &Popup) -> (Rect, Rect) {
@@ -435,7 +475,10 @@ impl Server {
         let motion = b & 32 != 0;
         if let Some(d) = self.popup_drags.get(&cid) {
             if !press {
-                self.popup_drags.remove(&cid);
+                let d = self.popup_drags.remove(&cid).expect("a drag");
+                if !d.resize {
+                    self.dock_dropped(&d.sid);
+                }
                 self.layout_popups();
                 self.save_popups();
                 return true;
@@ -534,5 +577,29 @@ impl Server {
         self.layout_popups();
         self.save_popups();
         self.animate_popups();
+    }
+}
+
+#[cfg(test)]
+mod snap_tests {
+    use super::{snap, span, EDGE};
+
+    #[test]
+    fn an_odd_spare_reaches_both_edges() {
+        // 167 columns, 50 wide: 117 spare, middle at 58; docked right is x = 58 + 59 = 117
+        assert_eq!(span(167, 50), (-58, 59));
+        assert_eq!(span(166, 50), (-58, 58));
+        assert_eq!(span(40, 50), (0, 0));
+    }
+
+    #[test]
+    fn dropped_next_to_an_edge_docks_there() {
+        let s = span(167, 50);
+        assert_eq!(snap(58, s), EDGE); // a click that moved a docked panel one cell
+        assert_eq!(snap(57, s), EDGE);
+        assert_eq!(snap(56, s), 56);
+        assert_eq!(snap(-57, s), -EDGE);
+        assert_eq!(snap(0, s), 0);
+        assert_eq!(snap(1, span(52, 50)), 1); // nearly full width: left as it is
     }
 }
