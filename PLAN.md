@@ -451,3 +451,7 @@ boxed list in the grid, a notice a line in the status bar.
 - [ ] (planned 2026-10-21) zash's pen drawings per zeit pane: tell zash each pane's rect, tab and
   scroll position (OSC 7733) so a drawing made on a pane moves, resizes, hides with its tab and
   scrolls with that pane's own history (zash ink.rs keeps the strokes)
+
+- [ ] (found 2026-10-21) a frozen client must never block the server: while a zash window hung
+  (a deadlock in zash), `zeit zfloat-shader` did not return for ~3 minutes. Writes to a client
+  that does not read should time out or queue and drop that client, not stall every command
