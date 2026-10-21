@@ -18,6 +18,8 @@ use zeit_proto::{read_msg, write_msg, Cell, Color, CursorShape, HolderMsg, ToHol
 pub enum PaneEvent {
     Output(String),
     /// an OSC 7733 message (zash's UI protocol) for the terminal the pane is shown in
+    // TODO (planned 2026-10-21): a message telling zash this pane's rect, tab and scroll, so zash's pen
+    // drawings stay on the pane they were drawn on (PLAN.md; zash ink.rs)
     Passthrough(String, Vec<u8>),
     /// a shell mark (OSC 133: A prompt, C output starts, D done) and the line it came at
     Mark { pane: String, kind: char, exit: Option<i32>, line: i64 },
