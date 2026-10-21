@@ -6,6 +6,7 @@ pub mod history;
 pub mod holder;
 pub mod keys;
 pub mod layout;
+pub mod options;
 pub mod look;
 pub mod pane;
 pub mod paths;

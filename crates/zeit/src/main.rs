@@ -21,6 +21,7 @@ Your shells keep running, and remember: a terminal multiplexer with tmux's keys.
   `new` [`-s` <name>] [`-d`]     a new session (-d: do not attach)
   `ls`                       list sessions          `kill-session -t` <name>
   `restart-server`           upgrade without losing anything (shells keep running)
+  `options`                  every option: what it does, its default (`show-options -A`: their values now)
 
 **Panes and windows:**
   `split-window` [`-h`]        split (beside with -h)  `new-window` [`-n` <name>]
@@ -160,6 +161,7 @@ fn main() {
             }
         }
         Some("-h") | Some("--help") | Some("help") => cli::print(&HELP.replace("{version}", env!("CARGO_PKG_VERSION"))),
+        Some("options") => print!("{}", zeit_core::options::reference()),
         Some("-V") | Some("--version") => println!("zeit {}", env!("CARGO_PKG_VERSION")),
         None => {
             let here = std::env::current_dir().map(|p| p.display().to_string()).ok();

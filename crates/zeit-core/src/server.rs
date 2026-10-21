@@ -2088,15 +2088,21 @@ impl Server {
                 let mut rest = positional.into_iter();
                 let name = rest.next().ok_or("set-option NAME VALUE")?;
                 let value = rest.collect::<Vec<_>>().join(" ");
+                // checked against the table (options.rs): a wrong value is refused, an unknown name kept with a word
+                let mut said = String::new();
                 if flag("-u") {
                     self.keys.opts.remove(&name);
                 } else {
+                    if let Some(w) = crate::options::check(&name, &value)? {
+                        said = w;
+                    }
                     self.keys.opts.insert(name, value);
                 }
                 self.look = Look::from(&self.keys.opts);
                 self.layout_all();
-                Ok(String::new())
+                Ok(said)
             }
+            "show-options" | "show" if flag("-A") || flag("-v") => Ok(crate::options::listing(&self.keys.opts)),
             "show-options" | "show" => Ok(self.keys.opts.iter().filter(|(k, _)| positional.is_empty() || positional.contains(k)).map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join("\n")),
             "set-environment" | "setenv" | "refresh-client" | "refresh" => Ok(String::new()),
             "send-prefix" => {
