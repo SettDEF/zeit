@@ -72,6 +72,8 @@ struct Client {
     last_zelt: String,
     /// the cells under the zfloat's edge last sent while it is dragged (zunder)
     last_under: String,
+    /// the zash effects last sent: (row, from, to, link); a row whose effects change is sent again
+    last_fx: Vec<(usize, usize, usize, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -348,7 +350,7 @@ impl Server {
                         }
                     }
                 });
-                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new(), last_zelt: String::new(), last_under: String::new() });
+                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new(), last_zelt: String::new(), last_under: String::new(), last_fx: Vec::new() });
             }
             Ev::Gone(id) => {
                 self.clients.remove(&id);
@@ -968,6 +970,9 @@ impl Server {
         let mut cursor = None;
         let mut shape = CursorShape::Block;
         let focus_rect = placed.iter().find(|(id, _)| *id == w.focus).map(|(_, r)| *r);
+        // zash effects on the panes' cells: (row, from, to, link, the cells), kept below only where
+        // nothing was drawn over them (a border, a float, a popup)
+        let mut fx: Vec<(usize, usize, usize, String, Vec<Cell>)> = Vec::new();
         for (id, r) in &placed {
             let Some(p) = self.panes.get(id) else { continue };
             let (screen, cur, sh) = p.screen();
@@ -980,6 +985,16 @@ impl Server {
                     let gx = r.x as usize + x;
                     if gx < grid[gy].len() {
                         grid[gy][gx] = cell.clone();
+                    }
+                }
+            }
+            for (y, from, to, link) in p.fx_runs() {
+                let (y, from, to) = (y as usize, from as usize, (to as usize).min(r.w as usize));
+                let gy = r.y as usize + y;
+                if y < r.h as usize && from < to && gy < grid.len() {
+                    let (gx, gx2) = (r.x as usize + from, (r.x as usize + to).min(grid[gy].len()));
+                    if gx < gx2 {
+                        fx.push((gy, gx, gx2, link, grid[gy][gx..gx2].to_vec()));
                     }
                 }
             }
@@ -1135,9 +1150,18 @@ impl Server {
         // only the rows that changed go out
         let c = self.clients.get_mut(&cid).unwrap();
         let full = c.last.len() != grid.len() || c.last.first().map(|r| r.len()) != grid.first().map(|r| r.len());
-        let changed: Vec<(u16, Vec<Cell>)> = grid.iter().enumerate().filter(|(i, row)| full || c.last.get(*i) != Some(row)).map(|(i, row)| (i as u16, row.clone())).collect();
+        // the effects still on their cells; a row whose effects are not the ones sent last counts as
+        // changed (a program puts one on text that is already there: the cells alone look the same)
+        let kept: Vec<(usize, usize, usize, String)> = fx.into_iter().filter(|(gy, gx, gx2, _, cells)| grid[*gy][*gx..*gx2] == cells[..]).map(|(gy, gx, gx2, link, _)| (gy, gx, gx2, link)).collect();
+        let fx_moved = |i: usize| kept.iter().filter(|k| k.0 == i).ne(c.last_fx.iter().filter(|k| k.0 == i));
+        let changed: Vec<(u16, Vec<Cell>)> = grid.iter().enumerate().filter(|(i, row)| full || c.last.get(*i) != Some(row) || fx_moved(*i)).map(|(i, row)| (i as u16, row.clone())).collect();
+        let fx: Vec<zeit_proto::FxRun> = kept.iter().cloned()
+            .filter(|(gy, ..)| changed.iter().any(|(r, _)| *r as usize == *gy))
+            .filter_map(|(gy, gx, gx2, link)| Some(zeit_proto::FxRun { row: gy as u16, from: gx as u16, to: gx2 as u16, body: crate::pane::fx_body(&link)? }))
+            .collect();
+        c.last_fx = kept;
         c.last = grid;
-        let frame = Frame { cols, rows, changed, cursor, cursor_shape: shape, title, modes };
+        let frame = Frame { cols, rows, changed, cursor, cursor_shape: shape, title, modes, fx };
         self.send(cid, &ServerMsg::Frame(frame));
         // web panes: where the terminal (zash) draws each page; hidden ones it hides
         let mut pins: HashMap<u32, (u16, u16, u16, u16, bool)> = HashMap::new();

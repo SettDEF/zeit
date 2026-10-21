@@ -76,6 +76,18 @@ pub struct Frame {
     pub title: String,
     /// what the focused program asked of the terminal (MODE_* bits)
     pub modes: u8,
+    /// zash effects on the changed rows: the terminal draws them over these cells (last, so a
+    /// frame with them still reads in a client from before them)
+    pub fx: Vec<FxRun>,
+}
+
+/// A run of cells under one zash effect (OSC 7733;fx): row, columns from..to, the escape's body.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct FxRun {
+    pub row: u16,
+    pub from: u16,
+    pub to: u16,
+    pub body: String,
 }
 
 pub const MODE_MOUSE: u8 = 1;
@@ -142,6 +154,23 @@ pub fn read_msg<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_client_from_before_fx_reads_frames_with_it() {
+        // a running client reconnects after restart-server with its old code: Frame without fx
+        #[derive(Deserialize)]
+        struct OldFrame { cols: u16, _rows: u16, changed: Vec<(u16, Vec<Cell>)>, _cursor: Option<(u16, u16)>, _shape: CursorShape, title: String, _modes: u8 }
+        #[derive(Deserialize)]
+        enum OldMsg { _Reply { _ok: bool, _text: String }, Frame(OldFrame) }
+        let row = vec![Cell { text: "a".into(), ..Cell::default() }];
+        let f = Frame { cols: 3, rows: 1, changed: vec![(0, row)], cursor: None, cursor_shape: CursorShape::Block, title: "t".into(), modes: 0, fx: vec![FxRun { row: 0, from: 0, to: 1, body: "underline;since=5".into() }] };
+        let mut buf = Vec::new();
+        write_msg(&mut buf, &ServerMsg::Frame(f)).unwrap();
+        let tag = |m: &ServerMsg| postcard::to_allocvec(m).unwrap()[0];
+        assert_eq!(tag(&ServerMsg::Frame(Frame { cols: 0, rows: 0, changed: vec![], cursor: None, cursor_shape: CursorShape::Block, title: String::new(), modes: 0, fx: vec![] })), 1, "Frame is the second variant, as OldMsg has it");
+        let Ok(OldMsg::Frame(old)) = read_msg::<_, OldMsg>(&mut &buf[..]) else { panic!("the old client could not read it") };
+        assert_eq!((old.cols, old.title.as_str(), old.changed[0].1[0].text.as_str()), (3, "t", "a"));
+    }
 
     #[test]
     fn frames_round_trip() {

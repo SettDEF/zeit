@@ -141,7 +141,16 @@ pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<Strin
                     for (r, row) in &f.changed {
                         out.push_str(&format!("\x1b[{};1H", r + 1));
                         let mut last: Option<(Color, Color, u8)> = None;
-                        for c in row {
+                        // zash effects on this row: started at their first column, ended after their last
+                        let runs: Vec<&zeit_proto::FxRun> = f.fx.iter().filter(|x| x.row == *r).collect();
+                        for (x, c) in row.iter().enumerate() {
+                            let x = x as u16;
+                            if runs.iter().any(|run| run.to == x && run.from < x) {
+                                out.push_str("\x1b]7733;fx;end\x1b\\");
+                            }
+                            if let Some(run) = runs.iter().find(|run| run.from == x) {
+                                out.push_str(&format!("\x1b]7733;fx;{}\x1b\\", run.body));
+                            }
                             if c.flags & zeit_proto::SPACER != 0 {
                                 continue;
                             }
@@ -151,6 +160,9 @@ pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<Strin
                                 last = Some(style);
                             }
                             out.push_str(&c.text);
+                        }
+                        if runs.iter().any(|run| run.to as usize >= row.len()) {
+                            out.push_str("\x1b]7733;fx;end\x1b\\");
                         }
                     }
                     out.push_str("\x1b[0m");

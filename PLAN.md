@@ -317,6 +317,10 @@ shell plugin, scripts), so their UI is really part of the window:
 - **panel**: a side or bottom panel with rows and actions
 - **image**: by id, placed at a cell (with the Kitty protocol underneath)
 - **status**: parts for zeit's status line drawn by zash
+- **effects** (OSC 7733;fx, done 2026-10-21): a hand-drawn underline, scribble, shimmer … on a run of
+  cells. zeit keeps them on the pane's cells (as a link) and sends them with the frame (Frame.fx, a
+  row's runs with since= so a redraw goes on drawing); panes get ZEIT_FX=1. Tiled panes only so far:
+  in floats and popups they are dropped
 
 Every message has a text fallback, so the same program still works in a
 plain terminal (and through zeit to a plain terminal): a popup becomes a

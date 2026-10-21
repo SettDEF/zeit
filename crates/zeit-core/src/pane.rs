@@ -257,6 +257,32 @@ impl Pane {
         true
     }
 
+    /// zash effects on the screen: (row, first column, end column, the cells' link), a run per
+    /// row; the server sends them on with the frame (see fx_body)
+    pub fn fx_runs(&self) -> Vec<(u16, u16, u16, String)> {
+        let t = self.term.lock();
+        let rows = t.screen_lines();
+        let content = t.renderable_content();
+        let offset = content.display_offset as i32;
+        let mut out: Vec<(u16, u16, u16, String)> = Vec::new();
+        for ic in content.display_iter {
+            let Some(link) = ic.cell.hyperlink() else { continue };
+            if !link.uri().starts_with(FX_SCHEME) {
+                continue;
+            }
+            let r = ic.point.line.0 + offset;
+            if r < 0 || r as usize >= rows {
+                continue;
+            }
+            let (r, c) = (r as u16, ic.point.column.0 as u16);
+            match out.last_mut() {
+                Some(run) if run.0 == r && run.2 == c && run.3 == link.uri() => run.2 = c + 1,
+                _ => out.push((r, c, c + 1, link.uri().to_string())),
+            }
+        }
+        out
+    }
+
     /// The screen as plain text (capture-pane).
     pub fn text(&self) -> String {
         let (rows, _, _) = self.screen();
@@ -296,6 +322,13 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
                     let mut t = term.lock();
                     parser.advance(&mut *t, &bytes[last..end]);
                     last = end;
+                    // an effect rides the cells' link, as in zash (given in order, as OSC 8: inside a
+                    // synchronized update the parser holds the text back); fx_runs reads it out again
+                    if let Place::Fx(body) = &what {
+                        let osc = if body.is_empty() || body == "end" { "\x1b]8;;\x1b\\".to_string() } else { format!("\x1b]8;;{FX_SCHEME}{};{}\x1b\\", now_ms(), body.replace(['\x07', '\x1b'], "")) };
+                        parser.advance(&mut *t, osc.as_bytes());
+                        continue;
+                    }
                     let line = t.grid().history_size() as i64 + t.grid().cursor.point.line.0 as i64;
                     drop(t);
                     let _ = events.send(match what {
@@ -304,6 +337,7 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
                         Place::Cmd(text) => PaneEvent::Cmd { pane: id.clone(), text },
                         Place::Keys(msg) => PaneEvent::Keys { pane: id.clone(), msg },
                         Place::WebPane(url) => PaneEvent::WebPane { pane: id.clone(), url },
+                        Place::Fx(_) => continue,
                     });
                 }
                 parser.advance(&mut *term.lock(), &bytes[last..]);
@@ -337,7 +371,7 @@ fn passthrough(chunk: &[u8]) -> Vec<Vec<u8>> {
         let start = i + p;
         let Some(end) = chunk[start..].iter().position(|&b| b == 0x07).map(|e| start + e + 1) else { break };
         // popups only: Neovim mode (7733;nvim) belongs to the pane, not to the outer window
-        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") && !chunk[start..end].starts_with(b"\x1b]7733;cmd;") && !chunk[start..end].starts_with(b"\x1b]7733;keys;") && !chunk[start..end].starts_with(b"\x1b]7733;webpane;") {
+        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") && !chunk[start..end].starts_with(b"\x1b]7733;cmd;") && !chunk[start..end].starts_with(b"\x1b]7733;keys;") && !chunk[start..end].starts_with(b"\x1b]7733;webpane;") && !chunk[start..end].starts_with(b"\x1b]7733;fx") {
             out.push(chunk[start..end].to_vec());
         }
         i = end;
@@ -351,6 +385,8 @@ enum Place {
     Keys(String),
     Job(String),
     Cmd(String),
+    /// zash's effect on the text after it (fx;NAME;…), or its end (fx;end)
+    Fx(String),
 }
 
 /// Where in a chunk the shell marks (OSC 133) and job lines (OSC 7733;job;ID) end.
@@ -376,8 +412,26 @@ fn places(chunk: &[u8]) -> Vec<(usize, Place)> {
             out.push((end.min(chunk.len()), Place::Keys(k.to_string())));
         } else if let Some(cmd) = body.strip_prefix("7733;cmd;") {
             out.push((end.min(chunk.len()), Place::Cmd(cmd.to_string())));
+        } else if let Some(fx) = body.strip_prefix("7733;fx") {
+            out.push((end.min(chunk.len()), Place::Fx(fx.trim_start_matches(';').to_string())));
         }
         i = end.min(chunk.len());
     }
     out
+}
+
+/// the link an effect rides on a pane's cells: zeitfx:START_MS;BODY
+pub const FX_SCHEME: &str = "zeitfx:";
+
+/// Milliseconds on the clock effects' starts are kept in.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// What zash gets for a run's link: its body, and since= how long ago it began, so a run sent
+/// again with a redrawn row goes on instead of starting over.
+pub fn fx_body(link: &str) -> Option<String> {
+    let (start, body) = link.strip_prefix(FX_SCHEME)?.split_once(';')?;
+    let since = now_ms().saturating_sub(start.parse().ok()?);
+    Some(format!("{body};since={since}"))
 }

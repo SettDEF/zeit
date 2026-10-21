@@ -58,6 +58,8 @@ fn spawn(id: &str, cwd: &Path, cols: u16, rows: u16, cmd: &[String]) -> std::io:
     }
     unsafe {
         std::env::set_var("ZEIT", "1");
+        // zash effects (OSC 7733;fx) reach the outer zash at their cells: programs may send them
+        std::env::set_var("ZEIT_FX", "1");
         std::env::set_var("ZEIT_PANE", id);
         std::env::set_var("TERM", "xterm-256color");
         std::env::set_var("COLORTERM", "truecolor");
