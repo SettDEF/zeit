@@ -1122,6 +1122,25 @@ impl Server {
                 }
             }
         }
+        // the floats' and the zfloat's effects too, where their text now is (zash clips their marks to
+        // them); a tiled pane's run they cover was dropped above (its cells are not there any more)
+        let mut on_top: Vec<(String, Rect)> = self.window_floats(&sid).iter().filter(|f| f.shown).map(|f| (f.pane.clone(), Rect { x: f.x + 1, y: f.y + 1, w: f.w.saturating_sub(2), h: f.h.saturating_sub(2) })).collect();
+        if let Some(p) = self.shown_popup(&sid) {
+            on_top.push((p.pane.clone(), self.popup_rect(p).1));
+        }
+        for (id, r) in &on_top {
+            let Some(p) = self.panes.get(id) else { continue };
+            for (y, from, to, link) in p.fx_runs() {
+                let (y, from, to) = (y as usize, from as usize, (to as usize).min(r.w as usize));
+                let gy = r.y as usize + y;
+                if y < r.h as usize && from < to && gy < grid.len() {
+                    let (gx, gx2) = (r.x as usize + from, (r.x as usize + to).min(grid[gy].len()));
+                    if gx < gx2 {
+                        fx.push((gy, gx, gx2, link, grid[gy][gx..gx2].to_vec()));
+                    }
+                }
+            }
+        }
         // the status line, and the hint bar above it when that module is on
         let status_row = if self.look.top { 0 } else { rows.saturating_sub(1) as usize };
         let mut left = format!(" {} ", s.name);
