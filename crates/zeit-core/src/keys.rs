@@ -81,6 +81,8 @@ impl Chord {
                 // with Ctrl, letters have no case (C-c and C-C are one key)
                 if c.ctrl { rest.to_lowercase() } else { rest.to_string() }
             }
+            // tmux's mouse keys: MouseDown1Pane M-MouseDrag1Pane S-WheelUpPane DoubleClick1Status …
+            _ if mouse_name(rest) => rest.to_string(),
             _ => return None,
         };
         Some(c)
@@ -353,6 +355,23 @@ fn unquote(s: &str) -> &str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn tmux_mouse_keys() {
+        // names a tmux.conf binds, with modifiers
+        let c = Chord::parse("M-MouseDrag1Pane").unwrap();
+        assert!(c.alt && c.key == "MouseDrag1Pane");
+        assert_eq!(Chord::parse("S-WheelUpPane").unwrap().key, "S-WheelUpPane");
+        assert_eq!(Chord::parse("DoubleClick1Status").unwrap().key, "DoubleClick1Status");
+        assert!(Chord::parse("MouseDown4Pane").is_none() && Chord::parse("Mousey").is_none());
+        // an SGR report as its key: Alt (8) + left drag (32), a release after it, the wheel with Ctrl
+        assert_eq!(mouse_key(32 | 8, true, false, 1, "Pane"), Chord::parse("M-MouseDrag1Pane").unwrap());
+        assert_eq!(mouse_key(0, false, true, 1, "Pane").key, "MouseDragEnd1Pane");
+        assert_eq!(mouse_key(0, false, false, 1, "Pane").key, "MouseUp1Pane");
+        assert_eq!(mouse_key(64 | 16, true, false, 1, "Pane"), Chord::parse("C-WheelUpPane").unwrap());
+        assert_eq!(mouse_key(2, true, false, 2, "Pane").key, "DoubleClick3Pane");
+        assert_eq!(mouse_key(4, true, false, 1, "Status").key, "S-MouseDown1Status");
+    }
+
     const CONF: &str = r##"
 unbind-key C-Space
 set-option -g prefix C-Space
@@ -484,4 +503,36 @@ mod byte_tests {
         assert_eq!(chord_from_bytes("ä".as_bytes()).unwrap().1, 2);
         assert_eq!(chord_from_bytes(b"\\").unwrap().0, Chord::parse("\\\\").unwrap());
     }
+}
+
+/// One of tmux's mouse keys (S- in front for Shift): MouseDown/Up/Drag/DragEnd 1-3, WheelUp/Down,
+/// SecondClick/DoubleClick/TripleClick 1-3, on a Pane, Border or Status (StatusLeft, StatusRight).
+pub fn mouse_name(s: &str) -> bool {
+    let s = s.strip_prefix("S-").unwrap_or(s);
+    let Some(rest) = ["Pane", "Border", "StatusLeft", "StatusRight", "Status"].iter().find_map(|w| s.strip_suffix(w)) else { return false };
+    if rest == "WheelUp" || rest == "WheelDown" {
+        return true;
+    }
+    let Some(kind) = rest.strip_suffix(['1', '2', '3']) else { return false };
+    matches!(kind, "MouseDown" | "MouseUp" | "MouseDrag" | "MouseDragEnd" | "SecondClick" | "DoubleClick" | "TripleClick")
+}
+
+/// The tmux mouse key of an SGR mouse report: its button bits (Shift 4, Meta 8, Ctrl 16, motion 32,
+/// wheel 64), pressed or let go, after a drag, clicks in a row, and where (Pane, Border, Status).
+pub fn mouse_key(b: u32, press: bool, dragged: bool, clicks: u8, place: &str) -> Chord {
+    let n = (b & 3) + 1;
+    let name = if b & 64 != 0 {
+        format!("{}{place}", if b & 1 == 0 { "WheelUp" } else { "WheelDown" })
+    } else if b & 32 != 0 {
+        format!("MouseDrag{n}{place}")
+    } else if !press {
+        format!("{}{n}{place}", if dragged { "MouseDragEnd" } else { "MouseUp" })
+    } else {
+        match clicks {
+            2 => format!("DoubleClick{n}{place}"),
+            3.. => format!("TripleClick{n}{place}"),
+            _ => format!("MouseDown{n}{place}"),
+        }
+    };
+    Chord { ctrl: b & 16 != 0, alt: b & 8 != 0, key: if b & 4 != 0 { format!("S-{name}") } else { name } }
 }

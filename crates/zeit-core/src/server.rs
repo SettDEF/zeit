@@ -107,6 +107,9 @@ pub struct Server {
     tx: Sender<Ev>,
     pane_tx: Sender<PaneEvent>,
     ext: Ext,
+    /// per client: the last press (when, where, clicks in a row) and whether a drag is going on, for
+    /// tmux's mouse keys (DoubleClick1Pane, MouseDragEnd1Pane)
+    mouse_state: HashMap<u64, (std::time::Instant, u16, u16, u8, bool)>,
     keys: Keys,
     /// the size panes are laid out for (the latest client's)
     size: (u16, u16),
@@ -198,7 +201,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), floats: Vec::new(), float_focus: HashMap::new(), float_drags: HashMap::new(), mouse_sel: HashMap::new() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), floats: Vec::new(), float_focus: HashMap::new(), float_drags: HashMap::new(), mouse_sel: HashMap::new(), mouse_state: HashMap::new() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -613,6 +616,59 @@ impl Server {
     }
 
     /// A mouse report from the client (SGR, 1-based cells of the whole screen).
+    /// A tmux mouse key bound for this event (Lua first, then bind -n; copy mode's table in copy mode):
+    /// run on the pane under the mouse, and true. Keeps each client's clicks in a row and drags.
+    #[allow(clippy::too_many_arguments)]
+    fn mouse_binding(&mut self, cid: u64, b: u32, x: u16, y: u16, press: bool, place: &str, pane: Option<String>) -> bool {
+        let (wheel, motion) = (b & 64 != 0, b & 32 != 0);
+        let prev = self.mouse_state.get(&cid).copied();
+        let mut clicks = 1;
+        let mut dragged = false;
+        if press && !motion && !wheel {
+            clicks = match prev {
+                Some((t, px, py, n, _)) if t.elapsed() < std::time::Duration::from_millis(400) && (px, py) == (x, y) => n % 3 + 1,
+                _ => 1,
+            };
+            self.mouse_state.insert(cid, (std::time::Instant::now(), x, y, clicks, false));
+        } else if motion && press {
+            if let Some(s) = self.mouse_state.get_mut(&cid) {
+                s.4 = true;
+            }
+        } else if !press && !wheel {
+            dragged = prev.is_some_and(|s| s.4);
+            if let Some(s) = self.mouse_state.get_mut(&cid) {
+                s.4 = false;
+            }
+        }
+        let mut keys = vec![crate::keys::mouse_key(b, press, dragged, clicks, place)];
+        // a double or triple click not bound as one: the press it also is
+        if clicks > 1 && press && !motion && !wheel {
+            keys.push(crate::keys::mouse_key(b, press, false, 1, place));
+        }
+        let copying = pane.as_ref().is_some_and(|p| self.copy.contains_key(p));
+        for key in keys {
+            let table = if copying { "copy" } else { "root" };
+            if self.ext.key(table, &key) {
+                for line in self.ext.take_commands() {
+                    if let Err(e) = self.run_line(Some(cid), pane.clone(), &line) {
+                        self.notice_all(e);
+                    }
+                }
+                self.dirty = true;
+                return true;
+            }
+            let map = if copying { &self.keys.copy } else { &self.keys.root };
+            if let Some(bd) = map.get(&key).cloned() {
+                if let Err(e) = self.run_line(Some(cid), pane.clone(), &bd.cmd) {
+                    self.notice_all(e);
+                }
+                self.dirty = true;
+                return true;
+            }
+        }
+        false
+    }
+
     fn mouse(&mut self, cid: u64, b: u32, x: u16, y: u16, press: bool) {
         let Some(sid) = self.client_session(cid) else { return };
         let area = self.area();
@@ -662,6 +718,13 @@ impl Server {
                 None => (placed, false),
             }
         };
+        // tmux's mouse keys: a binding for this one (bind -n M-MouseDrag1Pane …, init.lua) runs instead
+        let status_y = if self.look.top { 0 } else { self.size.1.saturating_sub(1) };
+        let hit = placed.iter().find(|(_, r)| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h).cloned();
+        let place = if hit.is_some() { "Pane" } else if cy == status_y { "Status" } else { "Border" };
+        if self.mouse_binding(cid, b, cx, cy, press, place, hit.as_ref().map(|(p, _)| p.clone())) {
+            return;
+        }
         let Some((pane, r)) = placed.into_iter().find(|(_, r)| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h) else { return };
         let focus = if in_popup { pane.clone() } else { window_focus };
         let wheel = b & 64 != 0;
