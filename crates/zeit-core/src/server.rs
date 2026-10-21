@@ -2881,17 +2881,23 @@ impl Server {
                 None
             }
             Overlay::Prompt { label, text, cur, .. } => {
+                // one field: a pill as the tab pills (their colours), the label bold at its start, the
+                // text and the cursor inside it; it grows with the text (30 columns to the whole line)
                 write_text(grid, status_row, 0, &" ".repeat(cols), l.status_fg, l.status_bg, 0);
-                write_text(grid, status_row, 0, "\u{e0b6}", l.primary, l.status_bg, 0);
-                write_text(grid, status_row, 1, label, l.on_primary, l.primary, zeit_proto::BOLD);
+                let label = label.trim_end();
                 let n = label.chars().count();
-                write_text(grid, status_row, 1 + n, "\u{e0b4}", l.primary, l.status_bg, 0);
-                let start = 3 + n;
+                let start = 2 + n + 1;
+                let max = cols.saturating_sub(1).max(start + 2);
+                let w = (start + text.chars().count() + 2).clamp(30.min(max), max);
+                write_text(grid, status_row, 0, "\u{e0b6}", l.pill, l.status_bg, 0);
+                write_text(grid, status_row, 1, &" ".repeat(w.saturating_sub(2)), l.muted, l.pill, 0);
+                write_text(grid, status_row, w.saturating_sub(1), "\u{e0b4}", l.pill, l.status_bg, 0);
+                write_text(grid, status_row, 2, label, l.muted, l.pill, zeit_proto::BOLD);
                 // a long line scrolls so the cursor stays visible
-                let room = cols.saturating_sub(start + 1).max(1);
+                let room = w.saturating_sub(start + 2).max(1);
                 let skip = cur.saturating_sub(room - 1);
                 let shown: String = text.chars().skip(skip).take(room).collect();
-                write_text(grid, status_row, start, &shown, Color::Default, l.status_bg, 0);
+                write_text(grid, status_row, start, &shown, l.muted, l.pill, 0);
                 Some(((start + cur - skip) as u16, status_row as u16))
             }
             Overlay::Choose { items, sel, .. } => {
