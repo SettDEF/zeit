@@ -607,3 +607,38 @@ mod snap_tests {
         assert_eq!(snap(1, span(52, 50)), 1); // nearly full width: left as it is
     }
 }
+
+impl Server {
+    /// While client `cid` drags the shown zfloat (a move, not a resize): the cells under its outer
+    /// rect's edge band (2 cells), as OSC 7733;zunder for zash. Rows of cells joined by "/", cells by
+    /// ".", each "text,fg,bg" with the text in hex (UTF-8) and colours d / iN / rrggbb; cells inside
+    /// the band are empty. Empty when there is no such drag.
+    pub(super) fn under_dragged(&self, cid: u64, sid: &str, grid: &[Vec<Cell>]) -> String {
+        if !self.popup_drags.get(&cid).is_some_and(|d| !d.resize && d.sid == sid) {
+            return String::new();
+        }
+        let Some(p) = self.shown_popup(sid) else { return String::new() };
+        let (o, _) = self.popup_rect(p);
+        let band = 2u16;
+        let color = |c: &Color| match c {
+            Color::Default => "d".to_string(),
+            Color::Indexed(i) => format!("i{i}"),
+            Color::Rgb(r, g, b) => format!("{r:02x}{g:02x}{b:02x}"),
+        };
+        let rows: Vec<String> = (0..o.h)
+            .map(|dy| {
+                (0..o.w)
+                    .map(|dx| {
+                        let edge = dy < band || dy + band >= o.h || dx < band || dx + band >= o.w;
+                        match grid.get((o.y + dy) as usize).and_then(|r| r.get((o.x + dx) as usize)).filter(|_| edge) {
+                            Some(c) => format!("{},{},{}", c.text.bytes().map(|b| format!("{b:02x}")).collect::<String>(), color(&c.fg), color(&c.bg)),
+                            None => String::new(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(".")
+            })
+            .collect();
+        format!("\x1b]7733;zunder;id={};x={};y={};w={};h={};cells={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, rows.join("/"))
+    }
+}

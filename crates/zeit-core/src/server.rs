@@ -70,6 +70,8 @@ struct Client {
     last_pins: HashMap<u32, (u16, u16, u16, u16, bool)>,
     /// the zelt last told to the terminal (OSC 7733;zelt), to send only changes
     last_zelt: String,
+    /// the cells under the zfloat's edge last sent while it is dragged (zunder)
+    last_under: String,
 }
 
 #[derive(Clone, Debug)]
@@ -346,7 +348,7 @@ impl Server {
                         }
                     }
                 });
-                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new(), last_zelt: String::new() });
+                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new(), last_zelt: String::new(), last_under: String::new() });
             }
             Ev::Gone(id) => {
                 self.clients.remove(&id);
@@ -1028,6 +1030,9 @@ impl Server {
             cursor = cur;
             shape = sh;
         }
+        // a zfloat dragged: what lies under its edge, before it is drawn over (zash shows it in the
+        // strip a pixel-smooth drag uncovers before the zfloat has moved a whole cell)
+        let under = self.under_dragged(cid, &sid, &grid);
         if let Some((cur, sh)) = self.draw_popup(&sid, &mut grid) {
             // the popup has the keyboard: its cursor; else the pane below keeps its own (if not covered)
             if !self.popup_below.contains(&sid) {
@@ -1145,6 +1150,11 @@ impl Server {
         let old_zelt = self.clients.get_mut(&cid).map(|c| std::mem::replace(&mut c.last_zelt, zelt.clone())).unwrap_or_default();
         if zelt != old_zelt {
             let msg = if zelt.is_empty() { "\x1b]7733;zfloatclose;\x07".to_string() } else { zelt };
+            self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
+        }
+        let old_under = self.clients.get_mut(&cid).map(|c| std::mem::replace(&mut c.last_under, under.clone())).unwrap_or_default();
+        if under != old_under {
+            let msg = if under.is_empty() { "\x1b]7733;zunder;\x07".to_string() } else { under };
             self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
         }
         let rows_msg = self.job_rows(&placed);
