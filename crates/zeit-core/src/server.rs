@@ -630,8 +630,8 @@ impl Server {
                 let (outer, inner) = self.popup_rect(p);
                 let inside = |r: Rect| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h;
                 if inside(inner) {
-                    // a click on the popup: up to it
-                    if self.popup_below.remove(&sid) {
+                    // a click on the popup: up to it (a click: moving over it or the wheel must not take the keys)
+                    if press && b & 96 == 0 && self.popup_below.remove(&sid) {
                         self.dirty = true;
                     }
                     (vec![(p.pane.clone(), inner)], true)
