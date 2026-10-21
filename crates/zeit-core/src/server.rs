@@ -1104,6 +1104,31 @@ impl Server {
         let title = self.panes.get(&w.focus).map(|p| p.title.lock().unwrap().clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| format!("zeit: {}", s.name));
         let modes = self.panes.get(&w.focus).map(|p| p.modes()).unwrap_or(0);
         let focus_id = w.focus.clone();
+        // the zfloat's place first, then the picture: a frame drawn before zash knows where the
+        // zfloat went shows zeit's text border at the new place (zash blanks it where it was)
+        // the shown zelt, for terminals that draw its frame themselves (zash): where, focus, name
+        let zelt = match self.shown_popup(&sid) {
+            Some(p) => {
+                let (o, _) = self.popup_rect(p);
+                // its own title and whether it has buttons (z.zfloat), for zash's frame
+                let opts = self.ext.zfloat_opts(&p.name);
+                let title = opts.title.clone().unwrap_or_else(|| p.name.clone());
+                // the panel in zeit's pill colour (the tab pills'), so both follow the theme together
+                let bg = match self.look.pill { Color::Rgb(r, g, b) => format!("bg={r:02x}{g:02x}{b:02x};"), _ => String::new() };
+                format!("\x1b]7733;zfloat;id={};x={};y={};w={};h={};focus={};buttons={};shader={};morph={};{bg}title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), u8::from(opts.buttons.unwrap_or(true)), opts.shader.as_deref().unwrap_or("").replace([';', '\x07', '\x1b'], ""), opts.morph.map(|m| m.to_string()).unwrap_or_default(), title.replace([';', '\x07', '\x1b'], " "))
+            }
+            None => String::new(),
+        };
+        let old_zelt = self.clients.get_mut(&cid).map(|c| std::mem::replace(&mut c.last_zelt, zelt.clone())).unwrap_or_default();
+        if zelt != old_zelt {
+            let msg = if zelt.is_empty() { "\x1b]7733;zfloatclose;\x07".to_string() } else { zelt };
+            self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
+        }
+        let old_under = self.clients.get_mut(&cid).map(|c| std::mem::replace(&mut c.last_under, under.clone())).unwrap_or_default();
+        if under != old_under {
+            let msg = if under.is_empty() { "\x1b]7733;zunder;\x07".to_string() } else { under };
+            self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
+        }
         // only the rows that changed go out
         let c = self.clients.get_mut(&cid).unwrap();
         let full = c.last.len() != grid.len() || c.last.first().map(|r| r.len()) != grid.first().map(|r| r.len());
@@ -1134,29 +1159,6 @@ impl Server {
             self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
         }
         // job lines, for terminals that draw them small (zash); sent when they change
-        // the shown zelt, for terminals that draw its frame themselves (zash): where, focus, name
-        let zelt = match self.shown_popup(&sid) {
-            Some(p) => {
-                let (o, _) = self.popup_rect(p);
-                // its own title and whether it has buttons (z.zfloat), for zash's frame
-                let opts = self.ext.zfloat_opts(&p.name);
-                let title = opts.title.clone().unwrap_or_else(|| p.name.clone());
-                // the panel in zeit's pill colour (the tab pills'), so both follow the theme together
-                let bg = match self.look.pill { Color::Rgb(r, g, b) => format!("bg={r:02x}{g:02x}{b:02x};"), _ => String::new() };
-                format!("\x1b]7733;zfloat;id={};x={};y={};w={};h={};focus={};buttons={};shader={};morph={};{bg}title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), u8::from(opts.buttons.unwrap_or(true)), opts.shader.as_deref().unwrap_or("").replace([';', '\x07', '\x1b'], ""), opts.morph.map(|m| m.to_string()).unwrap_or_default(), title.replace([';', '\x07', '\x1b'], " "))
-            }
-            None => String::new(),
-        };
-        let old_zelt = self.clients.get_mut(&cid).map(|c| std::mem::replace(&mut c.last_zelt, zelt.clone())).unwrap_or_default();
-        if zelt != old_zelt {
-            let msg = if zelt.is_empty() { "\x1b]7733;zfloatclose;\x07".to_string() } else { zelt };
-            self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
-        }
-        let old_under = self.clients.get_mut(&cid).map(|c| std::mem::replace(&mut c.last_under, under.clone())).unwrap_or_default();
-        if under != old_under {
-            let msg = if under.is_empty() { "\x1b]7733;zunder;\x07".to_string() } else { under };
-            self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
-        }
         let rows_msg = self.job_rows(&placed);
         if self.clients.get(&cid).is_some_and(|c| c.last_rows != rows_msg) {
             if let Some(c) = self.clients.get_mut(&cid) {
