@@ -240,6 +240,23 @@ impl Server {
         let list = self.popups.get(&sid).cloned().unwrap_or_default();
         let named = |n: &str| list.iter().find(|p| p.name == n).cloned();
         match cmd {
+            // zfloat-shader [-n name] <shader> [-m seconds]: what zash draws it with (it morphs to it)
+            "zfloat-shader" => {
+                let mut it = rest.iter();
+                let (mut shader, mut morph) = (None, None);
+                while let Some(a) = it.next() {
+                    if a == "-m" {
+                        morph = it.next().and_then(|v| v.parse::<f32>().ok());
+                    } else {
+                        shader = Some(a.clone());
+                    }
+                }
+                let shader = shader.ok_or("zfloat-shader <shader> (ps3/wave, a path, none)")?;
+                let shown = self.popup_shown.get(&sid).and_then(|pane| list.iter().find(|p| &p.pane == pane)).map(|p| p.name.clone());
+                let target = name.clone().or(shown).ok_or("no zfloat shown (or -n name)")?;
+                self.ext.set_zfloat_shader(&target, shader, morph);
+                self.dirty = true;
+            }
             "zfloat-hide" => {
                 self.popup_shown.remove(&sid);
                 self.popup_below.remove(&sid);

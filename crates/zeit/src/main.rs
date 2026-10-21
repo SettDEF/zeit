@@ -43,6 +43,7 @@ Your shells keep running, and remember: a terminal multiplexer with tmux's keys.
   `zfloat-toggle` / `zfloat-show` [`-n` <name>] [<command>]   show or hide / only show (made the first time)   prefix `f`
   `zfloat-list`   choose one   prefix `F`      `zfloat-layer` [up|down]   keys to it or the panes below   prefix `Tab`
   `zfloat-align` center|top|right|bottom-left…   `zfloat-move` `-U`|`-D`|`-L`|`-R` [n]   `zfloat-hide`   `zfloat-close`
+  `zfloat-shader` [`-n` <name>] <shader> [`-m` seconds]   what zash draws it with: ps3/wave, a path, none (a preset of the same scene morphs)
   mouse: drag the frame (or Alt+drag inside), Ctrl+drag or the corner resizes; tmux's `display-popup` works too
 
 **Jobs and history:**

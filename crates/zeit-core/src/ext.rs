@@ -66,6 +66,9 @@ pub struct ZfloatOpts {
     pub title: Option<String>,
     /// the preset, hide and close buttons on its frame
     pub buttons: Option<bool>,
+    /// the shader zash draws it with ("ps3/wave", a path, "none"), and how long a change morphs (s)
+    pub shader: Option<String>,
+    pub morph: Option<f32>,
 }
 
 pub struct Ext {
@@ -166,6 +169,16 @@ impl Ext {
     /// A zfloat's settings from the config (z.zfloat), empty when it has none.
     pub fn zfloat_opts(&self, name: &str) -> ZfloatOpts {
         self.st.borrow().zfloats.get(name).cloned().unwrap_or_default()
+    }
+
+    /// zfloat-shader: the shader a zfloat is drawn with from now on (zash morphs to it).
+    pub fn set_zfloat_shader(&self, name: &str, shader: String, morph: Option<f32>) {
+        let mut s = self.st.borrow_mut();
+        let e = s.zfloats.entry(name.to_string()).or_default();
+        e.shader = Some(shader);
+        if morph.is_some() {
+            e.morph = morph;
+        }
     }
 
     pub fn module(&self, name: &str) -> Option<Module> {
@@ -359,7 +372,8 @@ impl Ext {
         // z.map('<prefix>g', 'new-window lazygit' | function, { repeats = true })
         // keys: '<prefix>x' after the prefix, '<copy>y' in copy mode, plain 'M-j' always
         let st = self.st.clone();
-        // z.zfloat(name, { width, height, side, below, title, buttons }): a zfloat's own settings;
+        // z.zfloat(name, { width, height, side, below, title, buttons, shader, morph }): a zfloat's own
+        // settings (shader and morph also later, from an event: zash morphs to the new one);
         // called again (init.lua after a plugin), the fields it names win
         let st2 = st.clone();
         z.set("zfloat", lua.create_function(move |_, (name, o): (String, Table)| {

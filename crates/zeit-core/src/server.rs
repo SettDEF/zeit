@@ -1143,7 +1143,7 @@ impl Server {
                 let title = opts.title.clone().unwrap_or_else(|| p.name.clone());
                 // the panel in zeit's pill colour (the tab pills'), so both follow the theme together
                 let bg = match self.look.pill { Color::Rgb(r, g, b) => format!("bg={r:02x}{g:02x}{b:02x};"), _ => String::new() };
-                format!("\x1b]7733;zfloat;id={};x={};y={};w={};h={};focus={};buttons={};{bg}title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), u8::from(opts.buttons.unwrap_or(true)), title.replace([';', '\x07', '\x1b'], " "))
+                format!("\x1b]7733;zfloat;id={};x={};y={};w={};h={};focus={};buttons={};shader={};morph={};{bg}title={}\x07", pin_id(&p.pane), o.x, o.y, o.w, o.h, u8::from(!self.popup_below.contains(&sid)), u8::from(opts.buttons.unwrap_or(true)), opts.shader.as_deref().unwrap_or("").replace([';', '\x07', '\x1b'], ""), opts.morph.map(|m| m.to_string()).unwrap_or_default(), title.replace([';', '\x07', '\x1b'], " "))
             }
             None => String::new(),
         };
