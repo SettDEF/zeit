@@ -628,7 +628,7 @@ mod snap_tests {
 impl Server {
     /// While client `cid` drags the shown zfloat (a move, not a resize): the cells under its outer
     /// rect's edge band (2 cells), as OSC 7733;zunder for zash. Rows of cells joined by "/", cells by
-    /// ".", each "text,fg,bg" with the text in hex (UTF-8) and colours d / iN / rrggbb; cells inside
+    /// ".", each "text,fg,bg[,flags]" with the text in hex (UTF-8), colours d / iN / rrggbb and zeit-proto's style flags (when any); cells inside
     /// the band are empty. Empty when there is no such drag.
     pub(super) fn under_dragged(&self, cid: u64, sid: &str, grid: &[Vec<Cell>]) -> String {
         if !self.popup_drags.get(&cid).is_some_and(|d| !d.resize && d.sid == sid) {
@@ -648,6 +648,8 @@ impl Server {
                     .map(|dx| {
                         let edge = dy < band || dy + band >= o.h || dx < band || dx + band >= o.w;
                         match grid.get((o.y + dy) as usize).and_then(|r| r.get((o.x + dx) as usize)).filter(|_| edge) {
+                            // its style flags last (bold, italic, reverse …), when it has any: zash draws it as the pane does
+                            Some(c) if c.flags != 0 => format!("{},{},{},{}", c.text.bytes().map(|b| format!("{b:02x}")).collect::<String>(), color(&c.fg), color(&c.bg), c.flags),
                             Some(c) => format!("{},{},{}", c.text.bytes().map(|b| format!("{b:02x}")).collect::<String>(), color(&c.fg), color(&c.bg)),
                             None => String::new(),
                         }
