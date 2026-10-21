@@ -443,3 +443,7 @@ boxed list in the grid, a notice a line in the status bar.
   desktop window. Comes and goes with a key, survives detaching, and several
   runs stack in it (zeit's jobs are the natural base: they already run without a
   pane and keep their output).
+
+- [ ] (planned 2026-10-21) pass kitty graphics and sixel images through to the outer terminal, as
+  tmux does, so zett's animations show in zeit outside zash too; answer capability queries only
+  for what the outer terminal really has, so a program never draws what cannot be shown
