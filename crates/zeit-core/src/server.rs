@@ -148,6 +148,8 @@ pub struct Server {
     floats: Vec<floats::Float>,
     float_focus: HashMap<String, String>,
     float_drags: HashMap<u64, floats::FloatDrag>,
+    /// a mouse selection being made in a pane (its program does not take the mouse): where it began
+    mouse_sel: HashMap<String, (i32, usize)>,
     jobs: Vec<Job>,
     ticking: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -192,7 +194,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), floats: Vec::new(), float_focus: HashMap::new(), float_drags: HashMap::new() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), floats: Vec::new(), float_focus: HashMap::new(), float_drags: HashMap::new(), mouse_sel: HashMap::new() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -690,6 +692,51 @@ impl Server {
                 vec![0x1b, b'[', b'M', code.min(255) as u8, (px + 32).min(255) as u8, (py + 32).min(255) as u8]
             };
             p.input(&report);
+        } else if !wheel && (b & 3 == 0 || (!press && b & 3 == 3)) {
+            // the left button where the program does not take the mouse: select, as a terminal
+            // does, but inside this pane only (never its neighbours or the borders); the release
+            // copies, with the lines its program wrapped joined back (copytext.rs)
+            use alacritty_terminal::grid::Dimensions;
+            use alacritty_terminal::index::{Column, Line, Point, Side};
+            use alacritty_terminal::selection::{Selection, SelectionType};
+            let mut t = p.term.lock();
+            let d = t.grid().display_offset() as i32;
+            let (row, col) = ((cy - r.y) as i32 - d, (cx - r.x) as usize);
+            let col = col.min(t.columns().saturating_sub(1));
+            if press && !motion {
+                // a new start; a plain click clears what was selected
+                self.mouse_sel.insert(pane.clone(), (row, col));
+                t.selection = None;
+            } else if let Some(&(ay, ax)) = self.mouse_sel.get(&pane) {
+                let mut s = Selection::new(SelectionType::Simple, Point::new(Line(ay), Column(ax)), Side::Left);
+                s.update(Point::new(Line(row), Column(col)), Side::Right);
+                t.selection = Some(s);
+                if !press {
+                    self.mouse_sel.remove(&pane);
+                    let width = t.columns();
+                    let unwrap = self.keys.opts.get("copy-unwrap").map(String::as_str) != Some("off");
+                    if let Some(text) = t.selection_to_string().filter(|s| !s.is_empty() && (ay, ax) != (row, col)) {
+                        let text = crate::copytext::tidy(&text, width, unwrap);
+                        self.buffers.insert(0, text.clone());
+                        self.buffers.truncate(50);
+                        // the clipboard and the middle-click selection, as every terminal
+                        std::thread::spawn(move || {
+                            use std::io::Write;
+                            for args in [&[][..], &["--primary"][..]] {
+                                if let Ok(mut c) = std::process::Command::new("wl-copy").args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+                                    if let Some(mut i) = c.stdin.take() {
+                                        let _ = i.write_all(text.as_bytes());
+                                    }
+                                    let _ = c.wait();
+                                }
+                            }
+                        });
+                    } else {
+                        t.selection = None;
+                    }
+                }
+            }
+            self.dirty = true;
         } else if wheel {
             let up = b & 1 == 0;
             if p.alt_screen() {
