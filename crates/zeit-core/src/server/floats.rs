@@ -245,6 +245,9 @@ impl Server {
     /// Draws a session's shown floats, bottom first; returns the focused one's cursor.
     pub(super) fn draw_floats(&self, sid: &str, grid: &mut [Vec<Cell>]) -> Option<(Option<(u16, u16)>, CursorShape)> {
         let focus = self.focused_float(sid);
+        // z.modules { 'frames +rounded' }: round corners (╭╮╰╯), as the popups have
+        let round = self.ext.module("frames").is_some_and(|m| m.flags.iter().any(|f| f == "rounded"));
+        let (tl, tr, bl, br) = if round { ("╭", "╮", "╰", "╯") } else { ("┌", "┐", "└", "┘") };
         let mut out = None;
         for f in self.window_floats(sid).iter().filter(|f| f.shown) {
             let Some(pane) = self.panes.get(&f.pane) else { continue };
@@ -255,10 +258,10 @@ impl Server {
                     let Some(cell) = grid.get_mut(y as usize).and_then(|r| r.get_mut(x as usize)) else { continue };
                     let (top, bottom, left, right) = (y == f.y, y + 1 == f.y + f.h, x == f.x, x + 1 == f.x + f.w);
                     let text = match (top, bottom, left, right) {
-                        (true, _, true, _) => "┌",
-                        (true, _, _, true) => "┐",
-                        (_, true, true, _) => "└",
-                        (_, true, _, true) => "┘",
+                        (true, _, true, _) => tl,
+                        (true, _, _, true) => tr,
+                        (_, true, true, _) => bl,
+                        (_, true, _, true) => br,
                         (true, _, _, _) | (_, true, _, _) => "─",
                         (_, _, true, _) | (_, _, _, true) => "│",
                         _ => " ",
