@@ -470,7 +470,7 @@ boxed list in the grid, a notice a line in the status bar.
   that stops reading is shut down and dropped. Measured with a client whose output nobody read and
   a flooding pane: before, every `zeit ls` hung (20 s timeouts); after, one 2.4 s stall, then 4 ms.
 
-## One kind of float (decided 2026-10-27, not built)
+## One kind of float (decided 2026-10-27, built 2026-10-27)
 
 Floats (server/floats.rs: several shown per window, own rect, z-order, focus) and zfloats
 (server/popup.rs: one shown per session, centred + offsets, size in %, snap/dock/max, saved across
