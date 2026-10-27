@@ -469,3 +469,24 @@ boxed list in the grid, a notice a line in the status bar.
   Done 2026-10-23: each client socket has a 3 s write timeout (server.rs CLIENT_STALL); a client
   that stops reading is shut down and dropped. Measured with a client whose output nobody read and
   a flooding pane: before, every `zeit ls` hung (20 s timeouts); after, one 2.4 s stall, then 4 ms.
+
+## One kind of float (decided 2026-10-27, not built)
+
+Floats (server/floats.rs: several shown per window, own rect, z-order, focus) and zfloats
+(server/popup.rs: one shown per session, centred + offsets, size in %, snap/dock/max, saved across
+restarts, shaders) become one: the float is a zfloat with other defaults. Keys and verbs stay
+(`float`, M-f, prefix E, float-next, float-close, zfloat-*), as aliases where they differ.
+
+1. Popups learn what floats have: several shown at once per session (popup_shown → an ordered
+   stack, top = focused), `window: Option<window id>` (shown only with that window; None = every
+   window, as zfloats now), `transient` (gone when its program ends; zfloats keep their output),
+   a rect in cells as well as in % (floats are placed in cells).
+2. Drawing, mouse (raise on click, drag, Ctrl+drag resize) and keys go through the stack; the
+   rounded frames, titles and shaders for all.
+3. `float …` = `zfloat -n float-N --window --transient …`; toggle-floats = show/hide the window's;
+   float-next cycles the stack; float-close / zfloat-close close the focused one; float-embed and
+   zfloat-to-pane become one verb (both directions).
+4. floats.rs goes; restore keeps working for named ones (transient ones are not saved).
+5. Headless tests (own XDG_RUNTIME_DIR < 65 chars): two floats shown at once, click raises, close
+   keys, Claude's `prefix C` zfloat, restore after a server restart. Then install; running servers
+   keep the old code until restarted.
