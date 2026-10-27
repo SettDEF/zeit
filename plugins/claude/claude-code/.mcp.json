@@ -1,5 +1,5 @@
 {
   "mcpServers": {
-    "zeit": { "command": "zeit-claude", "args": ["mcp"] }
+    "zeit": { "command": "${HOME}/.local/bin/zeit-claude", "args": ["mcp"] }
   }
 }
