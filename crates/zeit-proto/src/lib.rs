@@ -95,6 +95,8 @@ pub const MODE_SGR_MOUSE: u8 = 2;
 pub const MODE_PASTE: u8 = 4;
 pub const MODE_APP_CURSOR: u8 = 8;
 pub const MODE_FOCUS: u8 = 16;
+/// the program asked for the Kitty keyboard protocol (CSI > 1 u): the outer terminal is asked too
+pub const MODE_KITTY_KEYS: u8 = 32;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ServerMsg {

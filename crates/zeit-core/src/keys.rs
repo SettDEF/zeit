@@ -195,9 +195,17 @@ impl Keys {
             "bind Space next-layout",
             "bind q display-panes",
             "bind T timeline",
+            "bind / hints",
             "bind f zfloat-toggle",
             "bind F zfloat-list",
             "bind Tab zfloat-layer",
+            // the shown zfloat: M fills the screen and back, = and _ grow and shrink it, J joins it
+            // into the window as a pane, U lifts the focused pane out into a zfloat
+            "bind M zfloat-max",
+            "bind -r = zfloat-resize +",
+            "bind -r _ zfloat-resize -",
+            "bind J zfloat-to-pane",
+            "bind U zfloat-from-pane",
             "bind -n M-f toggle-floats",
             "bind E float-embed",
             "bind ? keys",
@@ -440,11 +448,16 @@ pub fn chord_from_bytes(b: &[u8]) -> Option<(Chord, usize)> {
         0x1b => match b.get(1) {
             None => (c(false, false, "Escape"), 1),
             Some(b'[') => {
+                // the Kitty keyboard protocol: CSI code[;mods]u (Esc, and keys with Ctrl or Alt)
+                if let Some(k) = kitty_key(b) {
+                    return Some(k);
+                }
                 let (name, n) = match b.get(2) {
                     Some(b'A') => ("Up", 3),
                     Some(b'B') => ("Down", 3),
                     Some(b'C') => ("Right", 3),
                     Some(b'D') => ("Left", 3),
+                    Some(b'Z') => ("BTab", 3),
                     Some(b'5') if b.get(3) == Some(&b'~') => ("PageUp", 4),
                     Some(b'6') if b.get(3) == Some(&b'~') => ("PageDown", 4),
                     _ => return Some((c(false, false, "Escape"), 1)),
@@ -468,6 +481,51 @@ pub fn chord_from_bytes(b: &[u8]) -> Option<(Chord, usize)> {
             (c(false, false, s), len)
         }
     })
+}
+
+/// `CSI code[;mods]u` at the start of `b` (the Kitty keyboard protocol) as a chord, and its length.
+fn kitty_key(b: &[u8]) -> Option<(Chord, usize)> {
+    let end = b.iter().skip(2).position(|&x| !(x.is_ascii_digit() || x == b';' || x == b':'))? + 2;
+    if b.get(end) != Some(&b'u') {
+        return None;
+    }
+    let body = std::str::from_utf8(&b[2..end]).ok()?;
+    let mut parts = body.split(';');
+    // code[:shifted:base] — the code itself
+    let code: u32 = parts.next()?.split(':').next()?.parse().ok()?;
+    let mods: u32 = parts.next().and_then(|m| m.split(':').next()?.parse::<u32>().ok()).unwrap_or(1).saturating_sub(1);
+    let (shift, alt, ctrl) = (mods & 1 != 0, mods & 2 != 0, mods & 4 != 0);
+    let key = match code {
+        27 => "Escape".to_string(),
+        13 => "Enter".to_string(),
+        9 => if shift { "BTab".to_string() } else { "Tab".to_string() },
+        127 => "Backspace".to_string(),
+        32 => "Space".to_string(),
+        c => {
+            let ch = char::from_u32(c)?;
+            if shift { ch.to_uppercase().collect() } else { ch.to_string() }
+        }
+    };
+    Some((Chord { ctrl, alt, key }, end + 1))
+}
+
+/// Input with Kitty protocol keys in it, as the classic bytes (for a pane that did not ask for the
+/// protocol: the client still had it on when the focus moved).
+pub fn kitty_to_legacy(b: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == 0x1b && b.get(i + 1) == Some(&b'[') {
+            if let Some((k, n)) = kitty_key(&b[i..]) {
+                out.extend(chord_to_bytes(&k));
+                i += n;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
 }
 
 /// A chord as the bytes a terminal sends for it (send-prefix, tests).
@@ -502,6 +560,19 @@ mod byte_tests {
         assert_eq!(chord_from_bytes(&[0x02]).unwrap().0, Chord::parse("C-b").unwrap());
         assert_eq!(chord_from_bytes("ä".as_bytes()).unwrap().1, 2);
         assert_eq!(chord_from_bytes(b"\\").unwrap().0, Chord::parse("\\\\").unwrap());
+    }
+
+    #[test]
+    fn kitty_protocol_keys() {
+        // the prefix and bindings still match with the protocol on
+        assert_eq!(chord_from_bytes(b"\x1b[32;5u").unwrap(), (Chord::parse("C-Space").unwrap(), 7));
+        assert_eq!(chord_from_bytes(b"\x1b[106;3u").unwrap().0, Chord::parse("M-j").unwrap());
+        assert_eq!(chord_from_bytes(b"\x1b[27u").unwrap(), (Chord::parse("Escape").unwrap(), 5));
+        assert_eq!(chord_from_bytes(b"\x1b[97;6u").unwrap().0, Chord { ctrl: true, alt: false, key: "A".into() });
+        // arrows are not protocol keys
+        assert_eq!(chord_from_bytes(b"\x1b[A").unwrap().0, Chord::parse("Up").unwrap());
+        // for a pane that did not ask: back to the classic bytes, the rest as it is
+        assert_eq!(kitty_to_legacy(b"a\x1b[98;5ub\x1b[27u\x1b[A"), b"a\x02b\x1b\x1b[A".to_vec());
     }
 }
 

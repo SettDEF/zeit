@@ -12,9 +12,12 @@ use std::collections::{HashMap, HashSet};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 mod floats;
+mod inspect;
+mod hints;
 mod keysview;
 mod tree;
 mod popup;
+mod images;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use zeit_proto::{read_msg, write_msg, Cell, ClientMsg, Color, CursorShape, Frame, ServerMsg, VERSION};
@@ -55,6 +58,9 @@ struct Session {
     last: usize,
 }
 
+/// how long a write to a client may wait for it to read before the client is dropped
+const CLIENT_STALL: std::time::Duration = std::time::Duration::from_secs(3);
+
 struct Client {
     out: UnixStream,
     session: Option<String>,
@@ -74,6 +80,15 @@ struct Client {
     last_under: String,
     /// the zash effects last sent: (row, from, to, link); a row whose effects change is sent again
     last_fx: Vec<(usize, usize, usize, String)>,
+    /// the terminal it runs in shows Kitty graphics (zash, kitty: Hello's term=)
+    graphics: bool,
+    /// pane images last placed on it: zeit's id → (x, y, keys); the ones it has been sent
+    last_imgs: HashMap<u32, (u16, u16, String)>,
+    sent_imgs: HashSet<u32>,
+    /// it is zash (its UI protocol, OSC 7733): the panes' places last told to it
+    zash: bool,
+    last_panes: String,
+    last_layers: String,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +102,8 @@ enum Overlay {
     Timeline { pane: String, items: Vec<crate::history::Entry>, sel: usize, view: Option<usize> },
     /// choose-tree: the whole screen, the tree on top and the chosen one's panes below
     Tree(tree::TreeState),
+    /// hints: a pane's links, places, paths … lit up, Tab walks them (server/inspect.rs)
+    Hints { pane: String, hits: Vec<hints::Hit>, sel: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +140,10 @@ pub struct Server {
     /// the start of a mouse report whose end has not arrived yet
     carry: HashMap<u64, Vec<u8>>,
     look: Look,
+    /// panes' Kitty images, passed on to the clients (server/images.rs)
+    images: images::Images,
+    /// each pane's floats (zett's popups) in its own cells: x, y, w, h (OSC 7733;layers)
+    pane_layers: HashMap<String, Vec<[u16; 4]>>,
     /// copied text, newest first (tmux's paste buffers)
     buffers: Vec<String>,
     /// panes in copy mode
@@ -141,6 +162,8 @@ pub struct Server {
     claims: HashMap<String, (bool, HashSet<String>)>,
     /// the command each pane runs right now (from the shell's OSC 7733;cmd)
     running: HashMap<String, Running>,
+    /// each pane's commands as blocks (cmd:N), for inspect and find
+    blocks: HashMap<String, crate::blocks::Blocks>,
     /// what each pane ran, recently (the file keeps more)
     histories: HashMap<String, std::collections::VecDeque<crate::history::Entry>>,
     /// commands z.rule sent to another pane
@@ -201,7 +224,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), floats: Vec::new(), float_focus: HashMap::new(), float_drags: HashMap::new(), mouse_sel: HashMap::new(), mouse_state: HashMap::new() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), blocks: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), floats: Vec::new(), float_focus: HashMap::new(), float_drags: HashMap::new(), mouse_sel: HashMap::new(), mouse_state: HashMap::new(), images: Default::default(), pane_layers: HashMap::new() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -336,6 +359,9 @@ impl Server {
                 let id = self.next_client;
                 self.next_client += 1;
                 let Ok(reader) = stream.try_clone() else { return };
+                // a client that stops reading (a hung terminal) must not stall the server: its writes
+                // give up after CLIENT_STALL and it is dropped (send)
+                let _ = stream.set_write_timeout(Some(CLIENT_STALL));
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
                     let mut r = reader;
@@ -353,7 +379,7 @@ impl Server {
                         }
                     }
                 });
-                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new(), last_zelt: String::new(), last_under: String::new(), last_fx: Vec::new() });
+                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new(), last_zelt: String::new(), last_under: String::new(), last_fx: Vec::new(), graphics: false, last_imgs: HashMap::new(), sent_imgs: HashSet::new(), zash: false, last_panes: String::new(), last_layers: String::new() });
             }
             Ev::Gone(id) => {
                 self.clients.remove(&id);
@@ -381,6 +407,7 @@ impl Server {
                 self.dirty = true;
             }
             Ev::Pane(PaneEvent::Mark { pane, kind, exit, line }) => {
+                self.blocks.entry(pane.clone()).or_default().mark(kind, exit, line);
                 self.history_mark(&pane, kind, exit, line);
                 self.job_mark(&pane, kind, exit, line);
             }
@@ -405,8 +432,10 @@ impl Server {
                     }
                 }
             }
+            Ev::Pane(PaneEvent::CmdId { pane, id }) => self.blocks.entry(pane).or_default().cmd_id(id),
             Ev::Pane(PaneEvent::Cmd { pane, text }) => {
                 let cwd = self.panes.get(&pane).map(|p| p.cwd().display().to_string()).unwrap_or_default();
+                self.blocks.entry(pane.clone()).or_default().cmd(&text, &cwd, crate::history::now_ms());
                 self.running.insert(pane, Running { cmd: text, cwd, start: None, t: crate::history::now_ms(), at: std::time::Instant::now() });
             }
             Ev::Pane(PaneEvent::JobLine { pane: _, job, line }) => {
@@ -426,19 +455,47 @@ impl Server {
             }
             Ev::Pane(PaneEvent::Exited(id, code)) => self.pane_gone(&id, code),
             Ev::Pane(PaneEvent::Lost(id)) => self.pane_gone(&id, -1),
+            Ev::Pane(PaneEvent::Layers { pane, list }) => {
+                let rects: Vec<[u16; 4]> = list.split(';').filter_map(|r| {
+                    let n: Vec<u16> = r.split(',').filter_map(|x| x.parse().ok()).collect();
+                    (n.len() == 4).then(|| [n[0], n[1], n[2], n[3]])
+                }).collect();
+                self.pane_layers.insert(pane, rects);
+                self.dirty = true;
+            }
+            Ev::Pane(PaneEvent::Image { pane, body, line, col }) => {
+                // a Kitty image: kept for the clients; an answer the program asked for goes back to it
+                let outer = self.clients.values().any(|c| c.graphics);
+                if let Some(reply) = self.images.command(&pane, &body, line, col, outer) {
+                    if let Some(p) = self.panes.get(&pane) {
+                        p.input(reply.as_bytes());
+                    }
+                }
+                self.dirty = true;
+            }
         }
     }
 
     fn send(&mut self, client: u64, m: &ServerMsg) {
         let ok = self.clients.get_mut(&client).is_some_and(|c| write_msg(&mut c.out, m).is_ok());
         if !ok {
+            // a half-written message: the stream cannot be used again; the client sees it closed
+            if let Some(c) = self.clients.get(&client) {
+                let _ = c.out.shutdown(std::net::Shutdown::Both);
+            }
             self.clients.remove(&client);
         }
     }
 
     fn message(&mut self, cid: u64, m: ClientMsg) {
         match m {
-            ClientMsg::Hello { version, .. } => {
+            ClientMsg::Hello { version, client } => {
+                // the terminal it runs in (zeit;term=zash): what it can show
+                let term = client.split(';').find_map(|p| p.strip_prefix("term=")).unwrap_or("").to_lowercase();
+                if let Some(c) = self.clients.get_mut(&cid) {
+                    c.graphics = ["zash", "kitty", "ghostty", "wezterm", "konsole"].iter().any(|t| term.contains(t));
+                    c.zash = term.contains("zash");
+                }
                 self.send(cid, &ServerMsg::Hello { version: VERSION, server: format!("zeit {}", env!("CARGO_PKG_VERSION")) });
                 if version != VERSION {
                     self.send(cid, &ServerMsg::Reply { ok: false, text: format!("this server speaks protocol {VERSION}, the client {version}") });
@@ -604,6 +661,10 @@ impl Server {
             self.dirty = true;
         }
         let mut out = std::mem::take(plain);
+        // Kitty protocol keys only for programs that asked for them (the client turns it off after)
+        if p.modes() & zeit_proto::MODE_KITTY_KEYS == 0 {
+            out = crate::keys::kitty_to_legacy(&out);
+        }
         // paste markers only for programs that asked for them
         if p.modes() & zeit_proto::MODE_PASTE == 0 {
             for m in [&b"\x1b[200~"[..], &b"\x1b[201~"[..]] {
@@ -670,6 +731,11 @@ impl Server {
     }
 
     fn mouse(&mut self, cid: u64, b: u32, x: u16, y: u16, press: bool) {
+        // Ctrl+click (SGR: left button 0 + Ctrl 16): a link, file:line, path or hash under it does its
+        // job (server/hints.rs); anything else is a plain click
+        if press && b == 16 && self.open_at_client(cid, x.saturating_sub(1), y.saturating_sub(1)).is_ok() {
+            return;
+        }
         let Some(sid) = self.client_session(cid) else { return };
         let area = self.area();
         let Some(s) = self.session(&sid) else { return };
@@ -908,6 +974,8 @@ impl Server {
     }
 
     fn pane_gone(&mut self, pane: &str, code: i32) {
+        self.images.pane_gone(pane);
+        self.pane_layers.remove(pane);
         self.panes.remove(pane);
         if self.float_pane_gone(pane) {
             let _ = std::fs::remove_file(paths::pane_socket(pane));
@@ -1151,11 +1219,13 @@ impl Server {
         }
         left.push_str(&wins);
         let scrolled = self.panes.get(&w.focus).map(|p| p.scrolled()).unwrap_or(0);
-        let right = if scrolled > 0 { format!(" ↑ {scrolled} lines · type to return ") } else { notice.clone().unwrap_or_else(|| format!(" {} ", hostname())) };
+        // status-right: the user's own format (zoom, the zfloat …); a scroll or a notice still wins
+        let custom = self.keys.opts.get("status-right").filter(|f| !f.is_empty()).map(|f| self.fmt(Some(&w.focus), f));
+        let right = if scrolled > 0 { format!(" ↑ {scrolled} lines · type to return ") } else { notice.clone().or_else(|| custom.clone()).unwrap_or_else(|| format!(" {} ", hostname())) };
         let pills = crate::look::Look::pills(&self.keys.opts);
         if pills {
             let attached = self.clients.values().filter(|c| c.session.as_deref() == Some(&s.id)).count();
-            let right = if scrolled > 0 && !self.copy.contains_key(&w.focus) { right.clone() } else if let Some(n) = &notice { format!(" {n} ") } else { format!(" {} \u{f1acb} {attached} ", s.name) };
+            let right = if scrolled > 0 && !self.copy.contains_key(&w.focus) { right.clone() } else if let Some(n) = &notice { format!(" {n} ") } else if let Some(c) = &custom { c.clone() } else { format!(" {} \u{f1acb} {attached} ", s.name) };
             self.status_pills(&mut grid, status_row, s, &right);
         } else {
         write_text(&mut grid, status_row, 0, &" ".repeat(cols as usize), Color::Indexed(0), Color::Indexed(2), 0);
@@ -1189,6 +1259,9 @@ impl Server {
                     }
                     write_text(&mut grid, y, x, &label, fg, bg, zeit_proto::BOLD);
                 }
+            }
+            if let Overlay::Hints { pane, hits, sel } = o {
+                self.draw_hints(&mut grid, &placed, status_row, pane, hits, *sel);
             }
             let at = self.draw_overlay(o, &mut grid, status_row, area);
             if matches!(o, Overlay::Prompt { .. }) {
@@ -1266,6 +1339,55 @@ impl Server {
         }
         if !msg.is_empty() {
             self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
+        }
+        // where each shown pane is and the line at its top, for zash's pen: a stroke drawn on a pane
+        // stays on it (moves with it, scrolls with its history, hides with its tab); sent on change
+        if self.clients.get(&cid).is_some_and(|c| c.zash) {
+            let panes: Vec<String> = placed.iter().filter_map(|(id, r)| {
+                let p = self.panes.get(id)?;
+                let t = p.term.lock();
+                let top = t.grid().history_size() as i64 - t.grid().display_offset() as i64;
+                Some(format!("{}={},{},{},{},{top}", pin_id(id), r.x, r.y, r.w, r.h))
+            }).collect();
+            let msg = format!("\x1b]7733;panes;{}\x07", panes.join(";"));
+            // the programs' floats (zett's popups), moved to where their pane is and kept inside it
+            let layers: Vec<String> = placed.iter().flat_map(|(id, r)| {
+                // only while its program holds the screen (one that quit with a popup open sent no "none")
+                self.pane_layers.get(id).filter(|_| self.panes.get(id).is_some_and(|p| p.alt_screen())).into_iter().flatten().filter_map(move |l| {
+                    let (w, h) = (l[2].min(r.w.saturating_sub(l[0])), l[3].min(r.h.saturating_sub(l[1])));
+                    (w > 0 && h > 0).then(|| format!("{},{},{w},{h}", r.x + l[0], r.y + l[1]))
+                })
+            }).collect();
+            let lmsg = format!("\x1b]7733;layers;{}\x07", layers.join(";"));
+            let c = self.clients.get_mut(&cid).unwrap();
+            let send_layers = c.last_layers != lmsg;
+            if send_layers {
+                c.last_layers = lmsg.clone();
+            }
+            if c.last_panes != msg {
+                c.last_panes = msg.clone();
+                self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
+            }
+            if send_layers {
+                self.send(cid, &ServerMsg::Passthrough(lmsg.into_bytes()));
+            }
+        }
+        // panes' Kitty images, for a terminal that shows them: placed where each pane is, at the
+        // line it came on (moved or taken away as it scrolls); each image sent to a client once
+        if self.clients.get(&cid).is_some_and(|c| c.graphics) && (!self.images.places.is_empty() || self.clients.get(&cid).is_some_and(|c| !c.last_imgs.is_empty())) {
+            let shown: Vec<(String, u16, u16, u16, u16, i64)> = placed.iter().filter_map(|(id, r)| {
+                let p = self.panes.get(id)?;
+                let t = p.term.lock();
+                Some((id.clone(), r.x, r.y, r.w, r.h, t.grid().history_size() as i64 - t.grid().display_offset() as i64))
+            }).collect();
+            let want = images::visible(&self.images, &shown);
+            let c = self.clients.get_mut(&cid).unwrap();
+            let had = std::mem::take(&mut c.last_imgs);
+            let msg = images::changes(&self.images, &had, &want, &mut c.sent_imgs);
+            c.last_imgs = want;
+            if !msg.is_empty() {
+                self.send(cid, &ServerMsg::Passthrough(msg.into_bytes()));
+            }
         }
         // job lines, for terminals that draw them small (zash); sent when they change
         let rows_msg = self.job_rows(&placed);
@@ -1525,6 +1647,25 @@ impl Server {
                 self.save();
                 Ok(String::new())
             }
+            // a pane brought forward from outside (Dotos' "open session"): its session, window and
+            // pane on a client; answers that client's pid, so the caller can raise its terminal
+            "jump" => {
+                let t = opt("-t").ok_or("jump -t PANE")?;
+                let p = self.resolve_target(&t, None).ok_or_else(|| format!("no pane {t:?}"))?;
+                let (sid, wi) = self.where_is(&p).ok_or("that pane is not in a window (a float?)")?;
+                self.session_mut(&sid).unwrap().active = wi;
+                self.focus_pane(&p);
+                // an attached client: the one asking, else one showing that session, else any (a
+                // command run from outside is a connection too, but shows nothing)
+                let shows = |c: &Client| c.session.is_some();
+                let c = cid.filter(|c| self.clients.get(c).is_some_and(shows)).or_else(|| self.clients.iter().find(|(_, c)| c.session.as_deref() == Some(sid.as_str())).map(|(k, _)| *k)).or_else(|| self.clients.iter().find(|(_, c)| shows(c)).map(|(k, _)| *k));
+                let Some(c) = c.and_then(|c| self.clients.get_mut(&c)) else { return Err("no zeit client is attached".into()) };
+                c.session = Some(sid);
+                c.last.clear();
+                let pid = peer_pid(&c.out).map(|p| p.to_string()).unwrap_or_default();
+                self.dirty = true;
+                Ok(pid)
+            }
             "switch-client" | "switchc" => {
                 let t = opt("-t").ok_or("switch-client -t SESSION")?;
                 let sid = self.find_session(&t).ok_or_else(|| format!("no session {t:?}"))?;
@@ -1572,6 +1713,38 @@ impl Server {
                     p.input(&bytes);
                 }
                 Ok(String::new())
+            }
+            // what is on a pane, named (server/inspect.rs)
+            "inspect" => {
+                let p = target_pane.clone().ok_or("no pane")?;
+                let w = rest(&["-t"]);
+                let at = match (w.first().and_then(|c| c.parse().ok()), w.get(1).and_then(|r| r.parse().ok())) {
+                    (Some(c), Some(r)) => Some((c, r)),
+                    _ => None,
+                };
+                self.inspect(&p, at, flag("--json"))
+            }
+            "find" => {
+                let what = rest(&["-t"]).into_iter().next().ok_or("find KIND|/pattern/|cmd:N")?;
+                let panes: Vec<String> = if flag("-a") { self.panes.keys().cloned().collect() } else { target_pane.clone().into_iter().collect() };
+                self.find(&panes, &what, flag("--json"))
+            }
+            // zash's Ctrl+click: the cell of a client's screen, done as its hint (server/hints.rs)
+            "open-at" => {
+                let pid: i32 = opt("--client").and_then(|p| p.parse().ok()).ok_or("open-at --client PID COL ROW")?;
+                let w = rest(&["--client", "-t"]);
+                let (Some(x), Some(y)) = (w.first().and_then(|v| v.parse().ok()), w.get(1).and_then(|v| v.parse().ok())) else { return Err("open-at --client PID COL ROW".into()) };
+                self.open_at(pid, x, y)
+            }
+            "hints" => {
+                let p = target_pane.clone().ok_or("no pane")?;
+                let c = cid.ok_or("hints needs an attached client (prefix /)")?;
+                let kind = rest(&["-t"]).into_iter().next();
+                self.open_hints(c, &p, kind)
+            }
+            "blocks" => {
+                let p = target_pane.clone().ok_or("no pane")?;
+                self.blocks_list(&p, flag("--json"))
             }
             "capture-pane" | "capturep" => {
                 let p = target_pane.clone().ok_or("no pane")?;
@@ -1986,6 +2159,24 @@ impl Server {
             "session_attached" => s.map(|s| self.clients.values().filter(|c| c.session.as_deref() == Some(&s.id)).count().to_string()).unwrap_or_default(),
             "window_index" => here.map(|h| h.1.to_string()).unwrap_or_default(),
             "window_name" => here.as_ref().and_then(|(sid, wi)| self.session(sid).map(|s| self.window_title(&s.windows[*wi]))).unwrap_or_default(),
+            // the pane zoom (prefix z) and the shown zfloat, for the status line
+            "window_zoomed_flag" => b(here.as_ref().and_then(|(sid, wi)| self.session(sid).map(|s| s.windows[*wi].zoom)).unwrap_or(false)),
+            "window_panes" => here.as_ref().and_then(|(sid, wi)| self.session(sid).map(|s| s.windows[*wi].layout.ids().len().to_string())).unwrap_or_default(),
+            "zfloat_shown" | "zfloat_name" | "zfloat_cmd" | "zfloat_width" | "zfloat_height" | "zfloat_zoomed" | "zfloat_keys" | "zfloat_count" => {
+                let Some(sid) = here.as_ref().map(|h| h.0.clone()) else { return String::new() };
+                let f = self.shown_popup(&sid);
+                match name {
+                    "zfloat_shown" => b(f.is_some()),
+                    "zfloat_name" => f.map(|p| p.name.clone()).unwrap_or_default(),
+                    "zfloat_cmd" => f.map(|p| p.cmd.clone()).unwrap_or_default(),
+                    "zfloat_width" => f.map(|p| p.w.to_string()).unwrap_or_default(),
+                    "zfloat_height" => f.map(|p| p.h.to_string()).unwrap_or_default(),
+                    "zfloat_zoomed" => b(f.is_some_and(|p| p.before_max.is_some())),
+                    // the keys go to the zfloat (not to the panes below it)
+                    "zfloat_keys" => b(f.is_some() && !self.popup_below.contains(&sid)),
+                    _ => self.popups.get(&sid).map(|l| l.len()).unwrap_or(0).to_string(),
+                }
+            }
             "host" | "host_short" => hostname(),
             _ => String::new(),
         }
@@ -2243,7 +2434,7 @@ impl Server {
                 if let Some(c) = cid {
                     self.send(c, &ServerMsg::Reply { ok: true, text: "restarting".into() });
                 }
-                let _ = std::fs::remove_file(paths::server_socket("default"));
+                let _ = std::fs::remove_file(paths::server_socket(&paths::server_name()));
                 // the next server starts now, so it is there when the clients come back (they used to
                 // start it, and gave up when it took long: their windows closed)
                 spawn_server(&self.exe);
@@ -2767,6 +2958,10 @@ impl Server {
                     let (pane, items_c) = (pane.clone(), items.clone());
                     keep = self.timeline_key(cid, &k, &pane, &items_c, sel, view);
                 }
+                Overlay::Hints { pane, hits, sel } => {
+                    let (pane, hits_c) = (pane.clone(), hits.clone());
+                    keep = self.hints_key(cid, &k, &pane, &hits_c, sel);
+                }
                 Overlay::Panes => {
                     keep = false;
                     if let Some(n) = k.key.chars().next().and_then(|c| c.to_digit(10)).filter(|_| k.key.chars().count() == 1 && !k.ctrl) {
@@ -2982,6 +3177,7 @@ impl Server {
                 None
             }
             Overlay::Panes => None,
+            Overlay::Hints { .. } => None,
             Overlay::Tree(st) => {
                 self.draw_tree_view(st, grid, area);
                 None
@@ -3776,4 +3972,13 @@ pub fn spawn_server(exe: &std::path::Path) {
         });
     }
     let _ = c.spawn();
+}
+
+/// The process at the other end of a client's socket (SO_PEERCRED).
+fn peer_pid(s: &UnixStream) -> Option<i32> {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let r = unsafe { libc::getsockopt(s.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len) };
+    (r == 0 && cred.pid > 0).then_some(cred.pid)
 }

@@ -18,8 +18,6 @@ use zeit_proto::{read_msg, write_msg, Cell, Color, CursorShape, HolderMsg, ToHol
 pub enum PaneEvent {
     Output(String),
     /// an OSC 7733 message (zash's UI protocol) for the terminal the pane is shown in
-    // TODO (planned 2026-10-21): a message telling zash this pane's rect, tab and scroll, so zash's pen
-    // drawings stay on the pane they were drawn on (PLAN.md; zash ink.rs)
     Passthrough(String, Vec<u8>),
     /// a shell mark (OSC 133: A prompt, C output starts, D done) and the line it came at
     Mark { pane: String, kind: char, exit: Option<i32>, line: i64 },
@@ -29,8 +27,14 @@ pub enum PaneEvent {
     Keys { pane: String, msg: String },
     /// the command line the shell is about to run (OSC 7733;cmd;TEXT)
     Cmd { pane: String, text: String },
+    /// the number the shell gives the command it is about to run (OSC 7733;cmdid;N)
+    CmdId { pane: String, id: u32 },
     /// the shell printed a job's line (OSC 7733;job;ID) here
     JobLine { pane: String, job: String, line: i64 },
+    /// a Kitty graphics command (APC G, its body) with the cursor where it came (server/images.rs)
+    Image { pane: String, body: String, line: i64, col: usize },
+    /// the program's floats (zett's popups) in the pane's cells, for zash to raise
+    Layers { pane: String, list: String },
     Exited(String, i32),
     /// the holder vanished without saying the shell ended
     Lost(String),
@@ -86,7 +90,8 @@ impl Pane {
         let title = Arc::new(Mutex::new(String::new()));
         let replies = Replies { writer: writer.clone(), title: title.clone() };
         let size = term::test::TermSize::new(cols as usize, rows as usize);
-        let config = term::Config { scrolling_history: history, ..Default::default() };
+        // kitty_keyboard: a program may ask for the Kitty keyboard protocol (the client asks zash)
+        let config = term::Config { scrolling_history: history, kitty_keyboard: true, ..Default::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, replies)));
         let (t, pid_s, id_s) = (term.clone(), id.to_string(), id.to_string());
         std::thread::Builder::new().name(format!("zeit pane {pid_s}")).spawn(move || read_loop(reader, t, id_s, events))?;
@@ -182,6 +187,7 @@ impl Pane {
         if m.contains(TermMode::BRACKETED_PASTE) { out |= zeit_proto::MODE_PASTE; }
         if m.contains(TermMode::APP_CURSOR) { out |= zeit_proto::MODE_APP_CURSOR; }
         if m.contains(TermMode::FOCUS_IN_OUT) { out |= zeit_proto::MODE_FOCUS; }
+        if m.contains(TermMode::DISAMBIGUATE_ESC_CODES) { out |= zeit_proto::MODE_KITTY_KEYS; }
         out
     }
 
@@ -211,6 +217,77 @@ impl Pane {
         t.grid().history_size() as i64 + t.grid().cursor.point.line.0 as i64
     }
 
+
+    /// One cell, as `zeit inspect` tells it (Neovim's :Inspect for a terminal letter): its text,
+    /// colours, style and link. `abs` counted as abs_line counts.
+    pub fn cell_at(&self, abs: i64, col: usize) -> Option<CellInfo> {
+        let t = self.term.lock();
+        let hist = t.grid().history_size() as i64;
+        if abs < 0 || abs >= hist + t.screen_lines() as i64 || col >= t.columns() {
+            return None;
+        }
+        let c = &t.grid()[Line((abs - hist) as i32)][Column(col)];
+        let name = |c: AColor| match c {
+            AColor::Named(n) => format!("{n:?}").to_lowercase(),
+            AColor::Spec(rgb) => format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b),
+            AColor::Indexed(i) => format!("palette {i}"),
+        };
+        let f = c.flags;
+        let flags = [(Flags::BOLD, "bold"), (Flags::ITALIC, "italic"), (Flags::UNDERLINE, "underline"), (Flags::DOUBLE_UNDERLINE, "double underline"), (Flags::UNDERCURL, "undercurl"), (Flags::DIM, "dim"), (Flags::INVERSE, "reverse"), (Flags::STRIKEOUT, "strike"), (Flags::HIDDEN, "hidden"), (Flags::WIDE_CHAR, "wide")]
+            .into_iter()
+            .filter(|(b, _)| f.contains(*b))
+            .map(|(_, n)| n)
+            .collect();
+        let mut text = c.c.to_string();
+        if let Some(z) = c.zerowidth() {
+            text.extend(z.iter());
+        }
+        Some(CellInfo { text, fg: name(c.fg), bg: name(c.bg), flags, link: c.hyperlink().map(|h| h.uri().to_string()) })
+    }
+
+    /// The line the view's top row shows (scrolled back or live), counted as abs_line counts.
+    pub fn view_top(&self) -> i64 {
+        let t = self.term.lock();
+        t.grid().history_size() as i64 - t.grid().display_offset() as i64
+    }
+
+    /// The cursor: its line (as abs_line counts) and column.
+    pub fn cursor_at(&self) -> (i64, usize) {
+        let t = self.term.lock();
+        (t.grid().history_size() as i64 + t.grid().cursor.point.line.0 as i64, t.grid().cursor.point.column.0)
+    }
+
+    /// Lines `from..to` as the program wrote them: rows the terminal wrapped joined into one
+    /// (a long path or link is one thing), each with the row it starts on. A column `c` of a
+    /// joined line is on row `start + c / cols`, column `c % cols`.
+    pub fn logical_rows(&self, from: i64, to: i64) -> Vec<(i64, String)> {
+        let t = self.term.lock();
+        let hist = t.grid().history_size() as i64;
+        let rows = t.screen_lines() as i64;
+        let cols = t.columns();
+        let mut out: Vec<(i64, String)> = Vec::new();
+        let mut cur: Option<(i64, String)> = None;
+        for a in from.max(0)..to.min(hist + rows) {
+            let row = &t.grid()[Line((a - hist) as i32)];
+            let wrapped = row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+            let text: String = (0..cols).map(|x| row[Column(x)].c).collect();
+            let (start, mut acc) = cur.take().unwrap_or((a, String::new()));
+            acc.push_str(if wrapped { &text } else { text.trim_end() });
+            if wrapped {
+                cur = Some((start, acc));
+            } else {
+                out.push((start, acc));
+            }
+        }
+        if let Some(c) = cur {
+            out.push(c);
+        }
+        out
+    }
+
+    pub fn cols(&self) -> usize {
+        self.term.lock().columns()
+    }
     /// Rows `from..to` (counted as abs_line counts) as text.
     pub fn rows_text(&self, from: i64, to: i64) -> Vec<String> {
         let t = self.term.lock();
@@ -307,6 +384,8 @@ fn color(c: AColor) -> Color {
 fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String, events: Sender<PaneEvent>) {
     let mut parser: Processor = Processor::new();
     let mut marks = crate::timeline::Scanner::default();
+    // a Kitty image cut off at a read's end: the rest comes in the next (apcs)
+    let mut apc_carry: Vec<u8> = Vec::new();
     loop {
         match read_msg::<_, HolderMsg>(&mut r) {
             Ok(HolderMsg::Output(bytes)) => {
@@ -318,7 +397,10 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
                 }
                 // marks and job lines: the bytes up to each go in first, so its line is known
                 let mut last = 0;
-                for (end, what) in places(&bytes) {
+                let mut found = places(&bytes);
+                found.extend(apcs(&mut apc_carry, &bytes));
+                found.sort_by_key(|(e, _)| *e);
+                for (end, what) in found {
                     let mut t = term.lock();
                     parser.advance(&mut *t, &bytes[last..end]);
                     last = end;
@@ -330,13 +412,17 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
                         continue;
                     }
                     let line = t.grid().history_size() as i64 + t.grid().cursor.point.line.0 as i64;
+                    let col = t.grid().cursor.point.column.0;
                     drop(t);
                     let _ = events.send(match what {
                         Place::Mark(kind, exit) => PaneEvent::Mark { pane: id.clone(), kind, exit, line },
                         Place::Job(job) => PaneEvent::JobLine { pane: id.clone(), job, line },
                         Place::Cmd(text) => PaneEvent::Cmd { pane: id.clone(), text },
+                        Place::CmdId(n) => PaneEvent::CmdId { pane: id.clone(), id: n },
                         Place::Keys(msg) => PaneEvent::Keys { pane: id.clone(), msg },
                         Place::WebPane(url) => PaneEvent::WebPane { pane: id.clone(), url },
+                        Place::Image(body) => PaneEvent::Image { pane: id.clone(), body, line, col },
+                        Place::Layers(list) => PaneEvent::Layers { pane: id.clone(), list },
                         Place::Fx(_) => continue,
                     });
                 }
@@ -371,7 +457,7 @@ fn passthrough(chunk: &[u8]) -> Vec<Vec<u8>> {
         let start = i + p;
         let Some(end) = chunk[start..].iter().position(|&b| b == 0x07).map(|e| start + e + 1) else { break };
         // popups only: Neovim mode (7733;nvim) belongs to the pane, not to the outer window
-        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") && !chunk[start..end].starts_with(b"\x1b]7733;cmd;") && !chunk[start..end].starts_with(b"\x1b]7733;keys;") && !chunk[start..end].starts_with(b"\x1b]7733;webpane;") && !chunk[start..end].starts_with(b"\x1b]7733;fx") {
+        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") && !chunk[start..end].starts_with(b"\x1b]7733;cmd;") && !chunk[start..end].starts_with(b"\x1b]7733;cmdid;") && !chunk[start..end].starts_with(b"\x1b]7733;keys;") && !chunk[start..end].starts_with(b"\x1b]7733;webpane;") && !chunk[start..end].starts_with(b"\x1b]7733;fx") && !chunk[start..end].starts_with(b"\x1b]7733;layers") {
             out.push(chunk[start..end].to_vec());
         }
         i = end;
@@ -385,8 +471,13 @@ enum Place {
     Keys(String),
     Job(String),
     Cmd(String),
+    CmdId(u32),
     /// zash's effect on the text after it (fx;NAME;…), or its end (fx;end)
     Fx(String),
+    /// the program's floats (OSC 7733;layers;x,y,w,h;…), in the pane's cells
+    Layers(String),
+    /// a Kitty graphics command (APC G): its body
+    Image(String),
 }
 
 /// Where in a chunk the shell marks (OSC 133) and job lines (OSC 7733;job;ID) end.
@@ -410,8 +501,14 @@ fn places(chunk: &[u8]) -> Vec<(usize, Place)> {
             out.push((end.min(chunk.len()), Place::WebPane(u.to_string())));
         } else if let Some(k) = body.strip_prefix("7733;keys;") {
             out.push((end.min(chunk.len()), Place::Keys(k.to_string())));
+        } else if let Some(n) = body.strip_prefix("7733;cmdid;") {
+            if let Ok(n) = n.trim().parse() {
+                out.push((end.min(chunk.len()), Place::CmdId(n)));
+            }
         } else if let Some(cmd) = body.strip_prefix("7733;cmd;") {
             out.push((end.min(chunk.len()), Place::Cmd(cmd.to_string())));
+        } else if let Some(l) = body.strip_prefix("7733;layers;").or_else(|| (body == "7733;layers").then_some("")) {
+            out.push((end.min(chunk.len()), Place::Layers(l.to_string())));
         } else if let Some(fx) = body.strip_prefix("7733;fx") {
             out.push((end.min(chunk.len()), Place::Fx(fx.trim_start_matches(';').to_string())));
         }
@@ -434,4 +531,70 @@ pub fn fx_body(link: &str) -> Option<String> {
     let (start, body) = link.strip_prefix(FX_SCHEME)?.split_once(';')?;
     let since = now_ms().saturating_sub(start.parse().ok()?);
     Some(format!("{body};since={since}"))
+}
+
+/// A cell as `zeit inspect` tells it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CellInfo {
+    pub text: String,
+    pub fg: String,
+    pub bg: String,
+    pub flags: Vec<&'static str>,
+    pub link: Option<String>,
+}
+
+/// Kitty graphics commands (APC G … ESC \) in a chunk: where each ends and its body. One cut off
+/// at the chunk's end waits in `carry` for the rest (an image is many kilobytes).
+fn apcs(carry: &mut Vec<u8>, chunk: &[u8]) -> Vec<(usize, Place)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    if !carry.is_empty() {
+        match chunk.windows(2).position(|w| w == b"\x1b\\") {
+            Some(e) => {
+                carry.extend_from_slice(&chunk[..e]);
+                out.push((e + 2, Place::Image(String::from_utf8_lossy(&carry[3..]).to_string())));
+                carry.clear();
+                i = e + 2;
+            }
+            None => {
+                // a runaway (no end in 64 MB): dropped
+                carry.extend_from_slice(chunk);
+                if carry.len() > 64 << 20 {
+                    carry.clear();
+                }
+                return out;
+            }
+        }
+    }
+    while let Some(p) = chunk[i..].windows(3).position(|w| w == b"\x1b_G") {
+        let start = i + p;
+        match chunk[start..].windows(2).position(|w| w == b"\x1b\\") {
+            Some(e) => {
+                let end = start + e + 2;
+                out.push((end, Place::Image(String::from_utf8_lossy(&chunk[start + 3..start + e]).to_string())));
+                i = end;
+            }
+            None => {
+                carry.extend_from_slice(&chunk[start..]);
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod apc_tests {
+    use super::*;
+
+    #[test]
+    fn images_whole_and_cut_across_reads() {
+        let mut carry = Vec::new();
+        let got = apcs(&mut carry, b"hi\x1b_Ga=T,f=100;AAAA\x1b\\there\x1b_Ga=t,i=2;BB");
+        assert!(matches!(&got[..], [(21, Place::Image(b))] if b == "a=T,f=100;AAAA"));
+        assert_eq!(carry, b"\x1b_Ga=t,i=2;BB");
+        let got = apcs(&mut carry, b"CC\x1b\\after");
+        assert!(matches!(&got[..], [(4, Place::Image(b))] if b == "a=t,i=2;BBCC"));
+        assert!(carry.is_empty());
+    }
 }

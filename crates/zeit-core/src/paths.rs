@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
@@ -20,6 +20,12 @@ pub fn runtime_dir() -> PathBuf {
     dir
 }
 
+/// Which server: `$ZEIT_SERVER` (tmux's `-L`; Dotos runs its terminals on "dotos"), else "default".
+/// The programs in its panes inherit it, so `zeit` in them talks to the same one.
+pub fn server_name() -> String {
+    std::env::var("ZEIT_SERVER").ok().filter(|n| !n.is_empty() && !n.contains('/')).unwrap_or_else(|| "default".into())
+}
+
 /// The server's socket; `name` is tmux's `-L` (several servers side by side).
 pub fn server_socket(name: &str) -> PathBuf {
     runtime_dir().join(format!("{name}.sock"))
@@ -29,9 +35,13 @@ pub fn pane_socket(id: &str) -> PathBuf {
     runtime_dir().join("panes").join(format!("{id}.sock"))
 }
 
-/// `$XDG_STATE_HOME/zeit`: the timeline, saved sessions.
+/// `$XDG_STATE_HOME/zeit`: the timeline, saved sessions (another server's in `servers/NAME`).
 pub fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/state")).join("zeit")
+    let d = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/state")).join("zeit");
+    match server_name().as_str() {
+        "default" => d,
+        n => d.join("servers").join(n),
+    }
 }
 
 /// `$ZEIT_CONFIG` or `$XDG_CONFIG_HOME/zeit`: init.lua, plugins/.

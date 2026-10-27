@@ -448,14 +448,24 @@ boxed list in the grid, a notice a line in the status bar.
   runs stack in it (zeit's jobs are the natural base: they already run without a
   pane and keep their output).
 
-- [ ] (planned 2026-10-21) pass kitty graphics and sixel images through to the outer terminal, as
+- [x] (planned 2026-10-21) pass kitty graphics and sixel images through to the outer terminal, as
   tmux does, so zett's animations show in zeit outside zash too; answer capability queries only
   for what the outer terminal really has, so a program never draws what cannot be shown
+  Done 2026-10-23 for Kitty graphics (server/images.rs): a pane's image goes to each client once
+  under zeit's own id, placed at the pane line it came on, moved or removed as the pane scrolls,
+  splits or hides; a=q is answered by what the client's terminal is (Hello term=). Sixel is not
+  passed on (zash has none). Text after an image is not pushed past it (C=1 senders are right).
 
-- [ ] (planned 2026-10-21) zash's pen drawings per zeit pane: tell zash each pane's rect, tab and
+- [x] (planned 2026-10-21) zash's pen drawings per zeit pane: tell zash each pane's rect, tab and
   scroll position (OSC 7733) so a drawing made on a pane moves, resizes, hides with its tab and
   scrolls with that pane's own history (zash ink.rs keeps the strokes)
+  Done 2026-10-23: zeit tells zash where each shown pane is and the line at its top (OSC
+  7733;panes;ID=x,y,w,h,top, on change); a stroke begun on a pane is kept on that pane's lines
+  (zash ink.rs ZPane): it moves with the pane, scrolls with its history, hides with its tab.
 
-- [ ] (found 2026-10-21) a frozen client must never block the server: while a zash window hung
+- [x] (found 2026-10-21) a frozen client must never block the server: while a zash window hung
   (a deadlock in zash), `zeit zfloat-shader` did not return for ~3 minutes. Writes to a client
   that does not read should time out or queue and drop that client, not stall every command
+  Done 2026-10-23: each client socket has a 3 s write timeout (server.rs CLIENT_STALL); a client
+  that stops reading is shut down and dropped. Measured with a client whose output nobody read and
+  a flooding pane: before, every `zeit ls` hung (20 s timeouts); after, one 2.4 s stall, then 4 ms.

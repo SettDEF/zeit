@@ -50,6 +50,14 @@ Your shells keep running, and remember: a terminal multiplexer with tmux's keys.
   `timeline` [`-a`]            what this pane ran (-a: every pane)
   `jobs`, `job-run` [`-c` <dir>] `--` <command>   commands sent to other panes
 
+**What is on a pane, named** (each command is cmd:N, the number your prompt shows):
+  `blocks` [`--json`]                 the pane's commands, how each ended
+  `inspect` [<col> <row>] [`--json`]  a letter (the cursor's): colours, style, link, its cmd:N, the path/link/error it is in
+  `find` [`-a`] url|place|path|hash|ip|number|error|/re/|cmd:N [`--json`]   every match, where, in which cmd:N
+  `hints` [<kind>]   prefix /   lit up on the pane, a letter on each: the letter copies it, the capital does its job
+                     (link opens, file:line opens in nvim at the line, hash: git show, folder: a window there);
+                     Tab / S-Tab walk all (scrollback too), Enter copies, Space acts, C-o opens, C-e edits
+
 **Scripts:** tmux's verbs work: `send-keys`, `capture-pane -p`, `list-panes`,
 `display-message -p`, `if-shell`, `run-shell`, `set-option`, `lua` <code>
 
@@ -65,7 +73,7 @@ fn fail(msg: &str) -> ! {
 
 /// The server's socket, starting the server when none runs.
 fn connect() -> UnixStream {
-    let sock = paths::server_socket("default");
+    let sock = paths::server_socket(&paths::server_name());
     if let Ok(s) = UnixStream::connect(&sock) {
         return hello(s);
     }
@@ -82,7 +90,9 @@ fn connect() -> UnixStream {
 }
 
 fn hello(mut s: UnixStream) -> UnixStream {
-    write_msg(&mut s, &ClientMsg::Hello { version: VERSION, client: "zeit".into() }).unwrap_or_else(|e| fail(&e.to_string()));
+    // the terminal it runs in, for what the server sends it (Kitty graphics: server/images.rs)
+    let term = std::env::var("TERM_PROGRAM").or_else(|_| std::env::var("TERM")).unwrap_or_default();
+    write_msg(&mut s, &ClientMsg::Hello { version: VERSION, client: format!("zeit;term={term}") }).unwrap_or_else(|e| fail(&e.to_string()));
     match read_msg::<_, ServerMsg>(&mut s) {
         Ok(ServerMsg::Hello { .. }) => s,
         Ok(other) => fail(&format!("unexpected reply {other:?}")),
@@ -157,7 +167,7 @@ fn main() {
         }
         Some("server") => {
             let exe = std::env::current_exe().unwrap_or_else(|e| fail(&e.to_string()));
-            if let Err(e) = zeit_core::server::run("default", exe) {
+            if let Err(e) = zeit_core::server::run(&paths::server_name(), exe) {
                 fail(&e.to_string());
             }
         }
@@ -169,6 +179,12 @@ fn main() {
             attach(None, here);
         }
         Some("attach") | Some("a") | Some("attach-session") | Some("at") => attach(opt("-t"), None),
+        // a session as JSON lines for a program that draws it (Dotos): -t a session, or -c the folder's
+        Some("view") => {
+            let n = |f: &str, d: u16| opt(f).and_then(|v| v.parse().ok()).unwrap_or(d);
+            let s = connect();
+            std::process::exit(client::view(s, opt("-t"), opt("-c").or_else(|| std::env::current_dir().map(|p| p.display().to_string()).ok()), n("--cols", 80), n("--rows", 24)));
+        }
         Some("new") | Some("new-session") if !args.iter().any(|a| a == "-d") => {
             let mut w = args.clone();
             w.push("-d".into());

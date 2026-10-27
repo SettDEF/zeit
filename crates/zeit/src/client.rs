@@ -45,12 +45,18 @@ impl Raw {
     }
 }
 
+/// the Kitty keyboard protocol asked of the outer terminal for the focused program (popped on leaving)
+static KITTY_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl Drop for Raw {
     fn drop(&mut self) {
         if let Ok(p) = PINS.lock() {
             for id in p.iter() {
                 print!("\x1b]7733;webhide;id={id}\x07");
             }
+        }
+        if KITTY_KEYS.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            print!("\x1b[<u");
         }
         print!("\x1b]7733;keys;none\x07\x1b]7733;zfloatclose;\x07\x1b]7733;rows;\x07\x1b[0m\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[?25h\x1b[0 q\x1b[?1049l");
         let _ = std::io::stdout().flush();
@@ -172,6 +178,11 @@ pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<Strin
                         out.push_str(if on(zeit_proto::MODE_PASTE) { "\x1b[?2004h" } else { "\x1b[?2004l" });
                         out.push_str(if on(zeit_proto::MODE_APP_CURSOR) { "\x1b[?1h" } else { "\x1b[?1l" });
                         out.push_str(if on(zeit_proto::MODE_FOCUS) { "\x1b[?1004h" } else { "\x1b[?1004l" });
+                        // the Kitty keyboard protocol: pushed while the focused program wants it, popped after
+                        let kitty = on(zeit_proto::MODE_KITTY_KEYS);
+                        if kitty != KITTY_KEYS.swap(kitty, std::sync::atomic::Ordering::Relaxed) {
+                            out.push_str(if kitty { "\x1b[>1u" } else { "\x1b[<u" });
+                        }
                         modes = Some(f.modes);
                     }
                     out.push_str(&format!("\x1b]2;{}\x07", f.title.replace(['\x07', '\x1b'], "")));
@@ -282,4 +293,126 @@ pub fn attach(mut sock: UnixStream, session: Option<String>, place: Option<Strin
     let reason = drawer.join().unwrap_or_else(|_| "the client failed".into());
     drop(raw);
     Ok(reason)
+}
+
+/// `zeit view`: the session as JSON lines for a program that draws it itself (Dotos' terminal).
+/// Out, one line per frame: `{"cols","rows","changed":[[row,[[text,fg,bg,flags],…]],…],"cursor":[x,y]|null,"shape","title"}`,
+/// cells joined into runs of one style; colours "" (default), "i<n>" (palette) or "#rrggbb".
+/// In, one line each: `k <hex bytes>` keys, `s <cols> <rows>` a new size, `q` leave.
+pub fn view(mut sock: UnixStream, session: Option<String>, place: Option<String>, cols: u16, rows: u16) -> i32 {
+    if write_msg(&mut sock, &ClientMsg::Attach { session, place, cols, rows }).is_err() {
+        return 1;
+    }
+    let mut writer = match sock.try_clone() {
+        Ok(w) => w,
+        Err(_) => return 1,
+    };
+    // keys and sizes from stdin, as they come
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            let (verb, rest) = line.split_once(' ').unwrap_or((line.as_str(), ""));
+            let msg = match verb {
+                "k" => ClientMsg::Input((0..rest.len() / 2).filter_map(|i| u8::from_str_radix(&rest[i * 2..i * 2 + 2], 16).ok()).collect()),
+                "s" => {
+                    let mut n = rest.split_whitespace().filter_map(|v| v.parse::<u16>().ok());
+                    match (n.next(), n.next()) {
+                        (Some(c), Some(r)) if c > 0 && r > 0 => ClientMsg::Resize { cols: c, rows: r },
+                        _ => continue,
+                    }
+                }
+                "q" => break,
+                _ => continue,
+            };
+            if write_msg(&mut writer, &msg).is_err() {
+                break;
+            }
+        }
+        let _ = write_msg(&mut writer, &ClientMsg::Detach);
+    });
+    let mut out = std::io::stdout().lock();
+    loop {
+        match read_msg::<_, ServerMsg>(&mut sock) {
+            Ok(ServerMsg::Frame(f)) => {
+                let mut s = String::with_capacity(f.changed.len() * 64 + 128);
+                s.push_str(&format!("{{\"cols\":{},\"rows\":{},\"changed\":[", f.cols, f.rows));
+                for (i, (r, row)) in f.changed.iter().enumerate() {
+                    if i > 0 {
+                        s.push(',');
+                    }
+                    s.push_str(&format!("[{r},["));
+                    let mut run: Option<(Color, Color, u8, String)> = None;
+                    let mut first = true;
+                    let mut flush = |s: &mut String, run: &mut Option<(Color, Color, u8, String)>| {
+                        if let Some((fg, bg, fl, t)) = run.take() {
+                            if !first {
+                                s.push(',');
+                            }
+                            first = false;
+                            s.push_str(&format!("[{},\"{}\",\"{}\",{}]", json_str(&t), color(fg), color(bg), fl));
+                        }
+                    };
+                    for c in row {
+                        if c.flags & zeit_proto::SPACER != 0 {
+                            continue;
+                        }
+                        match &mut run {
+                            Some((fg, bg, fl, t)) if *fg == c.fg && *bg == c.bg && *fl == c.flags => t.push_str(&c.text),
+                            _ => {
+                                flush(&mut s, &mut run);
+                                run = Some((c.fg, c.bg, c.flags, c.text.clone()));
+                            }
+                        }
+                    }
+                    flush(&mut s, &mut run);
+                    s.push_str("]]");
+                }
+                s.push_str("],\"cursor\":");
+                match f.cursor {
+                    Some((x, y)) if f.cursor_shape != CursorShape::Hidden => s.push_str(&format!("[{x},{y}]")),
+                    _ => s.push_str("null"),
+                }
+                let shape = match f.cursor_shape {
+                    CursorShape::Beam => "beam",
+                    CursorShape::Underline => "underline",
+                    CursorShape::Hidden => "hidden",
+                    CursorShape::Block => "block",
+                };
+                s.push_str(&format!(",\"shape\":\"{shape}\",\"modes\":{},\"title\":{}}}\n", f.modes, json_str(&f.title)));
+                if out.write_all(s.as_bytes()).and_then(|_| out.flush()).is_err() {
+                    return 0;
+                }
+            }
+            Ok(ServerMsg::Bye { reason }) => {
+                let _ = writeln!(out, "{{\"bye\":{}}}", json_str(&reason));
+                return 0;
+            }
+            Ok(_) => {}
+            Err(_) => return 0,
+        }
+    }
+}
+
+fn color(c: Color) -> String {
+    match c {
+        Color::Default => String::new(),
+        Color::Indexed(n) => format!("i{n}"),
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+    }
+}
+
+fn json_str(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
 }

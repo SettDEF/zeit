@@ -69,6 +69,12 @@ pub struct ZfloatOpts {
     /// the shader zash draws it with ("ps3/wave", a path, "none"), and how long a change morphs (s)
     pub shader: Option<String>,
     pub morph: Option<f32>,
+    /// zfloat-resize + / - grows or shrinks by this much (%)
+    pub step: Option<u16>,
+    /// zfloat-max's size (%): under 100 leaves a margin
+    pub max: Option<(u16, u16)>,
+    /// the smallest a resize makes it (%)
+    pub min: Option<(u16, u16)>,
 }
 
 pub struct Ext {
@@ -167,8 +173,16 @@ impl Ext {
     }
 
     /// A zfloat's settings from the config (z.zfloat), empty when it has none.
+    /// A zfloat's settings: its own, over z.zfloat('*', …) for every zfloat.
     pub fn zfloat_opts(&self, name: &str) -> ZfloatOpts {
-        self.st.borrow().zfloats.get(name).cloned().unwrap_or_default()
+        let st = self.st.borrow();
+        let all = st.zfloats.get("*").cloned().unwrap_or_default();
+        let Some(o) = st.zfloats.get(name).cloned() else { return all };
+        ZfloatOpts {
+            width: o.width.or(all.width), height: o.height.or(all.height), side: o.side.or(all.side), below: o.below.or(all.below),
+            title: o.title.or(all.title), buttons: o.buttons.or(all.buttons), shader: o.shader.or(all.shader), morph: o.morph.or(all.morph),
+            step: o.step.or(all.step), max: o.max.or(all.max), min: o.min.or(all.min),
+        }
     }
 
     /// zfloat-shader: the shader a zfloat is drawn with from now on (zash morphs to it).
@@ -385,6 +399,13 @@ impl Ext {
             if let Some(v) = o.get::<Option<bool>>("below")? { e.below = Some(v); }
             if let Some(v) = o.get::<Option<String>>("title")? { e.title = Some(v); }
             if let Some(v) = o.get::<Option<bool>>("buttons")? { e.buttons = Some(v); }
+            if let Some(v) = o.get::<Option<String>>("shader")? { e.shader = Some(v); }
+            if let Some(v) = o.get::<Option<f32>>("morph")? { e.morph = Some(v); }
+            if let Some(v) = o.get::<Option<u16>>("step")? { e.step = Some(v); }
+            // max / min = { width = %, height = % }
+            let wh = |t: &Table| -> mlua::Result<(u16, u16)> { Ok((t.get::<Option<u16>>("width")?.unwrap_or(100), t.get::<Option<u16>>("height")?.unwrap_or(100))) };
+            if let Some(t) = o.get::<Option<Table>>("max")? { e.max = Some(wh(&t)?); }
+            if let Some(t) = o.get::<Option<Table>>("min")? { e.min = Some(wh(&t)?); }
             Ok(())
         })?)?;
         z.set("map", lua.create_function(move |lua, (keys, action, opts): (String, Value, Option<Table>)| {

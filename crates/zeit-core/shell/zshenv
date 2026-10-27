@@ -8,15 +8,20 @@ unset ZEIT_ORIG_ZDOTDIR
 if [[ -o interactive ]]; then
   autoload -Uz add-zsh-hook
   typeset -g _zeit_ran=0
+  # commands this shell ran: the next one is cmd:ZEIT_CMD (the prompt shows it, zeit names it so)
+  typeset -gi _zeit_n=0
   _zeit_precmd() {
     local s=$?
     (( _zeit_ran )) && print -n "\e]133;D;$s\a"
     _zeit_ran=0
+    export ZEIT_CMD=$(( _zeit_n + 1 ))
     print -n "\e]133;A\a"
   }
   # the command line goes along (OSC 7733;cmd), so zeit's timeline knows what ran
   _zeit_preexec() {
     _zeit_ran=1
+    (( _zeit_n++ ))
+    print -n "\e]7733;cmdid;$_zeit_n\a"
     local c=${1//$'\a'/}
     c=${c//$'\e'/}
     print -rn -- $'\e]7733;cmd;'"${c[1,4000]}"$'\a\e]133;C\a'

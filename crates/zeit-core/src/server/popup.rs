@@ -60,6 +60,9 @@ pub(super) struct Popup {
     pub ax: f32,
     #[serde(skip)]
     pub ay: f32,
+    /// size and place before zfloat-max made it fill the screen (the toggle goes back to it)
+    #[serde(default)]
+    pub before_max: Option<(u16, u16, i16, i16)>,
 }
 
 /// A popup being dragged by a client: its session, where the drag began, the offsets or size then.
@@ -318,6 +321,88 @@ impl Server {
                 }
                 self.save_popups();
             }
+            // zfloat-resize W [H]: in % of the screen; +N / -N grow or shrink (one value: both)
+            "zfloat-resize" => {
+                let shown = self.popup_shown.get(&sid).cloned().ok_or("no zfloat shown")?;
+                // its z.zfloat settings: the step of a bare + / -, and how small / big it may get
+                let fname = self.shown_popup(&sid).map(|p| p.name.clone()).unwrap_or_default();
+                let o = self.ext.zfloat_opts(&fname);
+                let step = o.step.unwrap_or(5) as i32;
+                let ((minw, minh), (maxw, maxh)) = (o.min.unwrap_or((20, 20)), o.max.unwrap_or((100, 100)));
+                let vals: Vec<String> = rest.iter().filter_map(|a| match a.as_str() { "+" => Some(format!("+{step}")), "-" => Some(format!("-{step}")), v if v.parse::<i32>().is_ok() => Some(v.to_string()), _ => None }).collect();
+                if vals.is_empty() {
+                    return Err("zfloat-resize W [H] (% of the screen; +N / -N grow or shrink, a bare + / - by the zfloat's step)".into());
+                }
+                let at = |cur: u16, v: &str, lo: u16, hi: u16| -> u16 {
+                    let n: i32 = v.parse().unwrap_or(0);
+                    (if v.starts_with('+') || v.starts_with('-') { cur as i32 + n } else { n }).clamp(lo.max(20) as i32, hi.min(100) as i32) as u16
+                };
+                if let Some(p) = self.popups.get_mut(&sid).and_then(|l| l.iter_mut().find(|p| p.pane == shown)) {
+                    p.w = at(p.w, &vals[0], minw, maxw);
+                    p.h = at(p.h, vals.get(1).unwrap_or(&vals[0]), minh, maxh);
+                    p.before_max = None;
+                }
+                self.layout_popups();
+                self.save_popups();
+            }
+            // zfloat-max: the whole screen (or its z.zfloat max size), and back to its size and place
+            "zfloat-max" => {
+                let shown = self.popup_shown.get(&sid).cloned().ok_or("no zfloat shown")?;
+                let fname = self.shown_popup(&sid).map(|p| p.name.clone()).unwrap_or_default();
+                let (mw, mh) = self.ext.zfloat_opts(&fname).max.unwrap_or((100, 100));
+                if let Some(p) = self.popups.get_mut(&sid).and_then(|l| l.iter_mut().find(|p| p.pane == shown)) {
+                    match p.before_max.take() {
+                        Some((w, h, dx, dy)) => (p.w, p.h, p.dx, p.dy) = (w, h, dx, dy),
+                        None => {
+                            p.before_max = Some((p.w, p.h, p.dx, p.dy));
+                            (p.w, p.h, p.dx, p.dy) = (mw.clamp(20, 100), mh.clamp(20, 100), 0, 0);
+                        }
+                    }
+                }
+                self.layout_popups();
+                self.save_popups();
+            }
+            // zfloat-to-pane [-h]: the shown zfloat becomes a pane of the window, beside the focused one
+            "zfloat-to-pane" => {
+                let shown = self.popup_shown.get(&sid).cloned().ok_or("no zfloat shown")?;
+                if let Some(l) = self.popups.get_mut(&sid) {
+                    l.retain(|p| p.pane != shown);
+                }
+                self.popup_shown.remove(&sid);
+                self.popup_below.remove(&sid);
+                let below_too = args.iter().any(|a| a == "-v");
+                let s = self.session_mut(&sid).ok_or("no session")?;
+                let w = s.windows.get_mut(s.active).ok_or("no window")?;
+                let at = w.focus.clone();
+                w.layout.split(&at, &shown, !below_too);
+                w.focus = shown;
+                self.layout_all();
+                self.save();
+                self.save_popups();
+            }
+            // zfloat-from-pane [-n name]: the focused pane leaves the layout and floats (it keeps running)
+            "zfloat-from-pane" => {
+                let pane = ctx.clone().or_else(|| cid.and_then(|c| self.client_pane(c))).ok_or("no pane")?;
+                let (psid, wi) = self.where_is(&pane).ok_or("no pane")?;
+                if self.session(&psid).map(|s| s.windows[wi].layout.ids().len()).unwrap_or(0) < 2 {
+                    return Err("zfloat-from-pane: the window has only this pane".into());
+                }
+                self.unlink_pane(&pane);
+                let base = name.clone().unwrap_or_else(|| "pane".into());
+                let mut label = base.clone();
+                let mut n = 2;
+                while list.iter().any(|p| p.name == label) {
+                    label = format!("{base}-{n}");
+                    n += 1;
+                }
+                self.popups.entry(psid.clone()).or_default().push(Popup { pane: pane.clone(), name: label, cmd: String::new(), w, h, dx: 0, dy: 0, ax: 0.0, ay: 0.0, before_max: None });
+                self.popup_shown.insert(psid.clone(), pane);
+                self.popup_below.remove(&psid);
+                self.layout_all();
+                self.layout_popups();
+                self.save();
+                self.save_popups();
+            }
             "zfloat-close" => {
                 let target = name.as_deref().and_then(named).map(|p| p.pane).or_else(|| self.popup_shown.get(&sid).cloned()).ok_or("no popup shown")?;
                 if let Some(p) = self.panes.get(&target) {
@@ -382,7 +467,7 @@ impl Server {
                             n += 1;
                         }
                         let pane = self.start_pane(dir, argv)?;
-                        let mut p = Popup { pane: pane.clone(), name: label, cmd: command, w, h, dx: 0, dy: 0, ax: 0.0, ay: 0.0 };
+                        let mut p = Popup { pane: pane.clone(), name: label, cmd: command, w, h, dx: 0, dy: 0, ax: 0.0, ay: 0.0, before_max: None };
                         if let Some(s) = &side {
                             // at that side from the start (no glide in from the middle)
                             (p.dx, p.dy) = pinned(s);

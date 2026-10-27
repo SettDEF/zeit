@@ -41,6 +41,7 @@ pub const OPTIONS: &[Opt] = &[
     o("status-bg", Kind::Color, "green", "the status bar's background (status-style wins)"),
     o("status-fg", Kind::Color, "black", "the status bar's text (status-style wins)"),
     o("status-right-gap", Kind::Int, "0", "columns left free at the bar's right end"),
+    o("status-right", Kind::Text, "", "the bar's right end, a format: #{session_name}, #{window_zoomed_flag}, #{zfloat_name}, #{?zfloat_zoomed,max,} … (empty: the session and its clients)"),
     o("pane-border-style", Kind::Style, "fg=brightblack", "the lines between panes"),
     o("pane-active-border-style", Kind::Style, "fg=green", "the lines around the focused pane"),
 ];
