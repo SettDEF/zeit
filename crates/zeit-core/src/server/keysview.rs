@@ -1,4 +1,4 @@
-//! The keys window (list-keys, prefix ?) and moving through the layers: panes, floats, the zfloat.
+//! The keys window (list-keys, prefix ?) and moving through the layers: the panes and the popups (floats, zfloats).
 
 use super::*;
 
@@ -35,58 +35,36 @@ impl Server {
         out
     }
 
-    /// The layer a client's keys are on: 0 the panes, 1 a float, 2 the zfloat.
-    fn layer_of(&self, sid: &str) -> u8 {
-        if self.shown_popup(sid).is_some() && !self.popup_below.contains(sid) {
-            2
-        } else if self.focused_float(sid).is_some() {
-            1
-        } else {
-            0
-        }
-    }
-
-    /// `layer-up` / `layer-down`: the keys one layer up (panes → floats → zfloat) or down;
-    /// a layer that has nothing is skipped, and what is up there is shown.
+    /// `layer-up` / `layer-down`: the keys up to the popups (floats and zfloats) or down to the
+    /// panes; going up with none shown shows the window's floats, else the last zfloat.
     pub(super) fn layer_move(&mut self, cid: Option<u64>, up: bool) -> Reply {
         let sid = cid.and_then(|c| self.client_session(c)).ok_or("no session")?;
-        let floats: Vec<String> = self.window_floats(&sid).iter().map(|f| f.pane.clone()).collect();
-        let has_zfloat = self.popups.get(&sid).is_some_and(|l| !l.is_empty());
-        let at = self.layer_of(&sid);
-        let to = match (up, at) {
-            (true, 0) if !floats.is_empty() => 1,
-            (true, 0 | 1) if has_zfloat => 2,
-            (false, 2) if !floats.is_empty() => 1,
-            (false, 2 | 1) => 0,
-            _ => return Err(if up { "nothing above (prefix f: a zfloat, M-f: a float)".into() } else { "already on the panes".into() }),
-        };
-        match to {
-            2 => {
-                if self.shown_popup(&sid).is_none() {
-                    let last = self.popups.get(&sid).and_then(|l| l.last()).map(|p| p.pane.clone());
-                    if let Some(p) = last {
-                        self.popup_shown.insert(sid.clone(), p);
-                    }
-                }
-                self.popup_below.remove(&sid);
+        let on_popup = self.shown_popup(&sid).is_some() && !self.popup_below.contains(&sid);
+        if !up {
+            if !on_popup {
+                return Err("already on the panes".into());
             }
-            1 => {
-                if self.shown_popup(&sid).is_some() {
-                    self.popup_below.insert(sid.clone());
-                }
-                for f in self.floats.iter_mut().filter(|f| floats.contains(&f.pane)) {
-                    f.shown = true;
-                }
-                self.float_focus.insert(sid.clone(), floats[floats.len() - 1].clone());
+            self.popup_below.insert(sid.clone());
+            self.dirty = true;
+            return Ok("the panes".into());
+        }
+        if on_popup {
+            return Err("already on the floats".into());
+        }
+        if self.shown_popup(&sid).is_none() {
+            let ids = self.session(&sid).and_then(|s| s.windows.get(s.active)).map(|w| w.layout.ids()).unwrap_or_default();
+            let list = self.popups.get(&sid).cloned().unwrap_or_default();
+            let mine: Vec<String> = list.iter().filter(|p| p.window.as_ref().is_some_and(|a| ids.contains(a))).map(|p| p.pane.clone()).collect();
+            let show = if mine.is_empty() { list.iter().rev().find(|p| p.window.is_none()).map(|p| vec![p.pane.clone()]).unwrap_or_default() } else { mine };
+            if show.is_empty() {
+                return Err("nothing above (prefix f: a zfloat, M-f: a float)".into());
             }
-            _ => {
-                if self.shown_popup(&sid).is_some() {
-                    self.popup_below.insert(sid.clone());
-                }
-                self.float_focus.remove(&sid);
+            for p in &show {
+                self.show_popup(&sid, p);
             }
         }
+        self.popup_below.remove(&sid);
         self.dirty = true;
-        Ok(["the panes", "the floats", "the zfloat"][to as usize].to_string())
+        Ok("the floats".into())
     }
 }

@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-mod floats;
 mod inspect;
 mod hints;
 mod keysview;
@@ -167,17 +166,13 @@ pub struct Server {
     /// what each pane ran, recently (the file keeps more)
     histories: HashMap<String, std::collections::VecDeque<crate::history::Entry>>,
     /// commands z.rule sent to another pane
-    /// popups per session (floating panes), and the one each session shows
+    /// popups per session (zfloats and floats), and the ones each session shows, bottom first
     popups: HashMap<String, Vec<popup::Popup>>,
-    popup_shown: HashMap<String, String>,
+    popup_stack: HashMap<String, Vec<String>>,
     /// sessions whose panes have the keyboard while their popup stays in view (the layer below)
     popup_below: HashSet<String>,
     /// popups being dragged, per client
     popup_drags: HashMap<u64, popup::Drag>,
-    /// floating panes (zellij's), the one with the keyboard per session, and drags
-    floats: Vec<floats::Float>,
-    float_focus: HashMap<String, String>,
-    float_drags: HashMap<u64, floats::FloatDrag>,
     /// a mouse selection being made in a pane (its program does not take the mouse): where it began
     mouse_sel: HashMap<String, (i32, usize)>,
     jobs: Vec<Job>,
@@ -224,7 +219,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), blocks: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_shown: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), floats: Vec::new(), float_focus: HashMap::new(), float_drags: HashMap::new(), mouse_sel: HashMap::new(), mouse_state: HashMap::new(), images: Default::default(), pane_layers: HashMap::new() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), blocks: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_stack: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), mouse_sel: HashMap::new(), mouse_state: HashMap::new(), images: Default::default(), pane_layers: HashMap::new() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -268,7 +263,6 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     s.restore();
     s.restore_popups();
     s.apply_zfloat_opts();
-    s.restore_floats();
     loop {
         // a frame held back by the cap is due at next_frame: wait for events only until then
         let ev = if s.dirty {
@@ -747,41 +741,32 @@ impl Server {
         if self.popup_drag(cid, &sid, b, cx, cy, press) {
             return;
         }
-        // a shown popup: clicks inside are its program's, a click outside hides it
-        let popup = self.shown_popup(&sid).cloned();
-        let (placed, in_popup) = match &popup {
-            Some(p) => {
-                let (outer, inner) = self.popup_rect(p);
-                let inside = |r: Rect| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h;
-                if inside(inner) {
-                    // a click on the popup: up to it (a click: moving over it or the wheel must not take the keys)
-                    if press && b & 96 == 0 && self.popup_below.remove(&sid) {
-                        self.dirty = true;
-                    }
-                    (vec![(p.pane.clone(), inner)], true)
-                } else if inside(outer) {
-                    return;
-                } else if self.popup_below.contains(&sid) {
-                    (placed, false)
-                } else {
-                    // a click beside the popup: down to the panes (the popup stays in view)
-                    if press && b & 96 == 0 {
-                        self.popup_below.insert(sid.clone());
-                        self.dirty = true;
-                    }
+        // the shown popups: the top one under the pointer has the event (its program's inside,
+        // its frame's on the edge); beside them, a click gives the keys to the panes below
+        let inside = |r: Rect| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h;
+        let hit = self.shown_popups(&sid).into_iter().rev().map(|p| (p.pane.clone(), self.popup_rect(p))).find(|(_, (o, _))| inside(*o));
+        let click = press && b & 96 == 0;
+        let (placed, in_popup) = match hit {
+            Some((pane, (_, inner))) if inside(inner) => {
+                // a click on one: up to it (a click: moving over it or the wheel must not take the keys)
+                if click && (self.popup_below.remove(&sid) || self.shown_popup(&sid).is_some_and(|t| t.pane != pane)) {
+                    self.show_popup(&sid, &pane);
+                    self.dirty = true;
+                }
+                (vec![(pane, inner)], true)
+            }
+            Some(_) => return,
+            None if self.popup_below.contains(&sid) || self.shown_popup(&sid).is_none() => (placed, false),
+            None => {
+                if click {
+                    self.popup_below.insert(sid.clone());
+                    self.dirty = true;
+                }
+                // beside a float the click goes on to the panes too, as zellij's; beside a zfloat it does not
+                if !self.shown_popup(&sid).is_some_and(|p| p.transient) {
                     return;
                 }
-            }
-            None => (placed, false),
-        };
-        // floats come next: a press there is theirs (raise, focus, drag), else beside them
-        let (placed, in_popup) = if in_popup {
-            (placed, in_popup)
-        } else {
-            match self.float_mouse(cid, &sid, b, cx, cy, press) {
-                Some((p, _)) if p.is_empty() => return,
-                Some((p, r)) => (vec![(p, r)], true),
-                None => (placed, false),
+                (placed, false)
             }
         };
         // tmux's mouse keys: a binding for this one (bind -n M-MouseDrag1Pane …, init.lua) runs instead
@@ -909,13 +894,9 @@ impl Server {
 
     fn client_pane(&self, cid: u64) -> Option<String> {
         let s = self.session(&self.client_session(cid)?)?;
-        // a shown popup has the keyboard (unless the layer below was chosen)
+        // the shown popup on top has the keyboard (unless the layer below was chosen)
         if let Some(p) = self.shown_popup(&s.id).filter(|_| !self.popup_below.contains(&s.id)) {
             return Some(p.pane.clone());
-        }
-        // then a float that has it
-        if let Some(f) = self.focused_float(&s.id) {
-            return Some(f);
         }
         Some(s.windows.get(s.active)?.focus.clone())
     }
@@ -977,11 +958,6 @@ impl Server {
         self.images.pane_gone(pane);
         self.pane_layers.remove(pane);
         self.panes.remove(pane);
-        if self.float_pane_gone(pane) {
-            let _ = std::fs::remove_file(paths::pane_socket(pane));
-            self.ext.emit("pane_exit", &[("pane", pane.to_string()), ("status", code.to_string())]);
-            return;
-        }
         if self.popup_gone(pane) {
             let _ = std::fs::remove_file(paths::pane_socket(pane));
             self.ext.emit("pane_exit", &[("pane", pane.to_string()), ("status", code.to_string())]);
@@ -1010,7 +986,7 @@ impl Server {
         let Some((sid, wi)) = self.where_is(pane) else { return };
         // its window's floats stay with the window (or go with it)
         let ids = self.session(&sid).map(|s| s.windows[wi].layout.ids()).unwrap_or_default();
-        self.reanchor_floats(pane, &ids);
+        self.reanchor_popups(pane, &ids);
         let Some(s) = self.session_mut(&sid) else { return };
         let w = &mut s.windows[wi];
         let layout = std::mem::replace(&mut w.layout, Layout::Leaf(String::new()));
@@ -1082,7 +1058,6 @@ impl Server {
             }
         }
         self.layout_popups();
-        self.layout_floats();
     }
 
     // ── drawing ──
@@ -1170,32 +1145,23 @@ impl Server {
                 *cell = Cell { text: text.into(), fg: if near { active } else { dim }, bg: Color::Default, flags: 0 };
             }
         }
-        // a popup floats over the panes and has the cursor
-        // floats over the tiled panes (under any zfloat); the focused one has the cursor
-        if let Some((cur, sh)) = self.draw_floats(&sid, &mut grid) {
-            cursor = cur;
-            shape = sh;
-        }
+        // the popups float over the panes, the one on top last
+        self.draw_popups(&sid, &mut grid, false);
         // a zfloat dragged: what lies under its edge, before it is drawn over (zash shows it in the
         // strip a pixel-smooth drag uncovers before the zfloat has moved a whole cell)
         let under = self.under_dragged(cid, &sid, &grid);
-        if let Some((cur, sh)) = self.draw_popup(&sid, &mut grid) {
+        if let Some((cur, sh)) = self.draw_popups(&sid, &mut grid, true) {
             // the popup has the keyboard: its cursor; else the pane below keeps its own (if not covered)
             if !self.popup_below.contains(&sid) {
                 cursor = cur;
                 shape = sh;
-            } else if let Some((outer, _)) = self.shown_popup(&sid).map(|p| self.popup_rect(p)) {
-                if cursor.is_some_and(|(x, y)| x >= outer.x && x < outer.x + outer.w && y >= outer.y && y < outer.y + outer.h) {
-                    cursor = None;
-                }
+            } else if self.shown_popups(&sid).iter().map(|p| self.popup_rect(p).0).any(|o| cursor.is_some_and(|(x, y)| x >= o.x && x < o.x + o.w && y >= o.y && y < o.y + o.h)) {
+                cursor = None;
             }
         }
-        // the floats' and the zfloat's effects too, where their text now is (zash clips their marks to
-        // them); a tiled pane's run they cover was dropped above (its cells are not there any more)
-        let mut on_top: Vec<(String, Rect)> = self.window_floats(&sid).iter().filter(|f| f.shown).map(|f| (f.pane.clone(), Rect { x: f.x + 1, y: f.y + 1, w: f.w.saturating_sub(2), h: f.h.saturating_sub(2) })).collect();
-        if let Some(p) = self.shown_popup(&sid) {
-            on_top.push((p.pane.clone(), self.popup_rect(p).1));
-        }
+        // the popups' effects too, where their text now is (zash clips their marks to them); a
+        // tiled pane's run they cover was dropped above (its cells are not there any more)
+        let on_top: Vec<(String, Rect)> = self.shown_popups(&sid).iter().map(|p| (p.pane.clone(), self.popup_rect(p).1)).collect();
         for (id, r) in &on_top {
             let Some(p) = self.panes.get(id) else { continue };
             for (y, from, to, link) in p.fx_runs() {
@@ -2169,12 +2135,13 @@ impl Server {
                     "zfloat_shown" => b(f.is_some()),
                     "zfloat_name" => f.map(|p| p.name.clone()).unwrap_or_default(),
                     "zfloat_cmd" => f.map(|p| p.cmd.clone()).unwrap_or_default(),
-                    "zfloat_width" => f.map(|p| p.w.to_string()).unwrap_or_default(),
-                    "zfloat_height" => f.map(|p| p.h.to_string()).unwrap_or_default(),
+                    "zfloat_width" => f.map(|p| self.popup_pct(p).0.to_string()).unwrap_or_default(),
+                    "zfloat_height" => f.map(|p| self.popup_pct(p).1.to_string()).unwrap_or_default(),
                     "zfloat_zoomed" => b(f.is_some_and(|p| p.before_max.is_some())),
                     // the keys go to the zfloat (not to the panes below it)
                     "zfloat_keys" => b(f.is_some() && !self.popup_below.contains(&sid)),
-                    _ => self.popups.get(&sid).map(|l| l.len()).unwrap_or(0).to_string(),
+                    // floats aside
+                    _ => self.popups.get(&sid).map(|l| l.iter().filter(|p| !p.transient).count()).unwrap_or(0).to_string(),
                 }
             }
             "host" | "host_short" => hostname(),
@@ -2434,6 +2401,7 @@ impl Server {
                 if let Some(c) = cid {
                     self.send(c, &ServerMsg::Reply { ok: true, text: "restarting".into() });
                 }
+                self.end_transient_popups();
                 let _ = std::fs::remove_file(paths::server_socket(&paths::server_name()));
                 // the next server starts now, so it is there when the clients come back (they used to
                 // start it, and gave up when it took long: their windows closed)
