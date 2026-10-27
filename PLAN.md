@@ -508,3 +508,22 @@ hintbar, floating and frames are checked today. In this order:
    restored on start (what PLAN "Survives" promises).
 Beyond zellij: `layouts +auto` (the layout follows pane count and size), `floating +popout`
 (a float becomes a desktop window, and back) and `+overlay` (a drop-down on a key), timeline scrub.
+
+### Programmable like Neovim / Emacs / zett (the base for the list above)
+- **Own layouts in Lua**, like xmonad/awesome: `z.layout.define('cols3', function(panes, area)
+  … return rects end)` gets the panes (id, name, command, focus, min size) and the area, returns
+  one rect per pane; then usable everywhere a built-in is (select-layout, next-layout, layout
+  files, `layouts +auto` rules such as "3+ panes on a wide window: cols3"). The built-ins are
+  written the same way, so they are examples to copy.
+- **Options like vim.o**: `z.o.status_position = 'top'`, `z.wo` per window, `z.po` per pane,
+  every tmux option and every zeit one, listed with `:options` / `zeit show-options`, documented
+  in `zeit help options` (as zett's :help).
+- **Keys per mode**: `z.map(mode, key, fn | 'verb', { desc })` for prefix, root, copy, every hint
+  bar mode and user-made modes (`z.mode.define('git', { … })`); desc shows in the hint bar and the
+  shell's keybinds menu.
+- **Events**: `z.on('pane_exit' | 'pane_new' | 'window_layout' | 'focus' | 'output_match' …, fn)`,
+  like autocmds; `z.api` for everything a verb can do (panes, windows, sessions, floats).
+- **Look in Lua**: status line, frames, float titles and the hint bar as Lua functions returning
+  segments (text + colour role from tinct), not only format strings.
+- **Modules and plugins the same way**: `~/.config/zeit/lua/` like nvim's, `require` your own,
+  plugins in Lua or WASM.
