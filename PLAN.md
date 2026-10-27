@@ -490,3 +490,21 @@ restarts, shaders) become one: the float is a zfloat with other defaults. Keys a
 5. Headless tests (own XDG_RUNTIME_DIR < 65 chars): two floats shown at once, click raises, close
    keys, Claude's `prefix C` zfloat, restore after a server restart. Then install; running servers
    keep the old code until restarted.
+
+## More than zellij (planned 2026-10-27, after "one kind of float")
+
+Have already: layouts + next-layout, stacked, swap-pane, zoom, choose-tree, command prompt, palette,
+welcome, hintbar, timeline. The modules list (ext.rs MODULES) knows more than the server reads: only
+hintbar, floating and frames are checked today. In this order:
+1. Pane names and frames: `select-pane -T NAME`, `pane-border-status top|bottom|off`,
+   `pane-border-format` (#{pane_title}, the command, the exit status), `frames +names` reads them.
+2. `synchronize-panes on|off` (window option): keys go to every pane of the window; shown in the
+   frames and the status line.
+3. Layout files in Lua: `zeit --layout FILE` / `z.layout { windows = { … } }` (panes, sizes, folders,
+   commands, floats), and `zeit save-layout NAME` writes a session as one.
+4. Modes as the hintbar module's options (pane, tab, resize, move, session, locked), each with its
+   keys from init.lua, shown in the hint bar.
+5. Sessions back after a reboot: layout, folders and commands per pane written on change and
+   restored on start (what PLAN "Survives" promises).
+Beyond zellij: `layouts +auto` (the layout follows pane count and size), `floating +popout`
+(a float becomes a desktop window, and back) and `+overlay` (a drop-down on a key), timeline scrub.
