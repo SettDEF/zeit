@@ -80,8 +80,15 @@ pub fn hook() {
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&f) {
         let _ = writeln!(file, "{e}");
     }
-    // the view on the right, beside this Claude (the keys stay with Claude)
-    if event == "PreToolUse" {
+    // the view beside this Claude (the keys stay with Claude): shown once per Claude session and pane, so
+    // hidden or closed it stays so (prefix C brings it back); never with ~/.config/zeit/claude-view-off
+    let home = std::env::var("HOME").unwrap_or_default();
+    let off = std::path::Path::new(&home).join(".config/zeit/claude-view-off").exists();
+    let session = v.get("session_id").and_then(|s| s.as_str()).unwrap_or("");
+    let seen = f.with_extension("shown");
+    let first = std::fs::read_to_string(&seen).map(|s| s.trim() != session).unwrap_or(true);
+    if event == "PreToolUse" && !off && first {
+        let _ = std::fs::write(&seen, session);
         let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "zeit-claude".into());
         let viewer = format!("{exe} view {}", f.display());
         // its size, side and look are the zfloat "claude"'s settings in zeit's config (z.zfloat)

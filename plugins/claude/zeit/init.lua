@@ -8,6 +8,7 @@ z.zfloat('claude', {
   side = 'top-right',  -- right, left, top-right, bottom-right, top-left, bottom-left, center
   below = true,        -- the keys stay with Claude (prefix Tab moves them up into the view)
   title = 'Claude',
-  buttons = true,      -- presets, hide, close on its frame
+  buttons = true,      -- presets, hide, close on its frame (closed it stays closed this session; prefix C shows it)
 })
 z.map('<prefix>C', 'zfloat-toggle -n claude', { desc = 'Show or hide what Claude runs' })
+-- never shown: touch ~/.config/zeit/claude-view-off (the plugin's tools keep working)
