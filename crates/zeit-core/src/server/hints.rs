@@ -1,6 +1,6 @@
 //! `hints` (prefix /): a pane's links, file:line places, paths, hashes and addresses lit up, each
 //! kind in its colour, the ones in view with a letter. A letter picks one: lowercase copies it,
-//! uppercase does what that kind is for (a link opens, a place opens in nvim at its line, a hash
+//! uppercase does what that kind is for (a link opens, a place opens in the editor (@editor, zett by default) at its line, a hash
 //! shows its commit, a folder opens a window there). Tab / S-Tab walk them all, the scrollback
 //! too. Rows the terminal wrapped count as one line, so a long path is one hint.
 
@@ -157,7 +157,13 @@ impl Server {
 
     fn hint_edit(&mut self, cid: u64, pane: &str, h: &Hit) -> bool {
         let (file, line) = self.hit_target(pane, h);
-        let mut cmd = vec!["new-window".to_string(), "--".into(), "nvim".into()];
+        // the editor: the @editor option, else zett (with its full path: the server's PATH may lack
+        // ~/.local/bin), else nvim; all three take +LINE
+        let editor = self.keys.opts.get("@editor").cloned().filter(|e| !e.trim().is_empty()).unwrap_or_else(|| {
+            let z = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(".local/bin/zett");
+            if z.is_file() { z.to_string_lossy().to_string() } else { "nvim".into() }
+        });
+        let mut cmd = vec!["new-window".to_string(), "--".into(), editor];
         if let Some(l) = line {
             cmd.push(format!("+{l}"));
         }
@@ -168,7 +174,7 @@ impl Server {
 
     /// What the kind is for: a link opens, a place opens at its line, a hash shows its commit (in
     /// the repository of the command that printed it), a folder opens a window there, a file opens
-    /// in nvim; an address is copied.
+    /// in the editor (@editor, zett by default); an address is copied.
     fn hint_act(&mut self, cid: u64, pane: &str, h: &Hit) -> bool {
         match h.kind {
             "url" => self.hint_open(pane, h),
