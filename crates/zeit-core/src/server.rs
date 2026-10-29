@@ -1156,12 +1156,12 @@ impl Server {
                         grid[gy][gx] = cell.clone();
                     }
                 }
-                // more of the line to the right / to the left: a dim marker at that edge
+                // more of the line to the right / to the left: a green marker at that edge (the theme's green)
                 if cut && r.w > 2 {
                     let has = |c: &Cell| !c.text.trim().is_empty();
                     let mark = |grid: &mut Vec<Vec<Cell>>, gx: usize, ch: &str| {
                         if gx < grid[gy].len() {
-                            grid[gy][gx] = Cell { text: ch.into(), fg: grid[gy][gx].fg, bg: grid[gy][gx].bg, flags: zeit_proto::DIM | zeit_proto::BOLD };
+                            grid[gy][gx] = Cell { text: ch.into(), fg: zeit_proto::Color::Indexed(2), bg: grid[gy][gx].bg, flags: zeit_proto::BOLD };
                         }
                     };
                     if row.iter().skip(h + r.w as usize).any(has) {
