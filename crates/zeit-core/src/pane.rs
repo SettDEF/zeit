@@ -35,6 +35,8 @@ pub enum PaneEvent {
     Image { pane: String, body: String, line: i64, col: usize },
     /// the program's floats (zett's popups) in the pane's cells, for zash to raise
     Layers { pane: String, list: String },
+    /// zash's UI hints (OSC 7733;ui;…) in the pane's cells, and the line at the pane's top when they came
+    Ui { pane: String, body: String, top: i64 },
     Exited(String, i32),
     /// the holder vanished without saying the shell ended
     Lost(String),
@@ -413,6 +415,8 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
                     }
                     let line = t.grid().history_size() as i64 + t.grid().cursor.point.line.0 as i64;
                     let col = t.grid().cursor.point.column.0;
+                    // the cursor's row on the screen: line less it is the screen's top line
+                    let t_line = t.grid().cursor.point.line.0 as i64;
                     drop(t);
                     let _ = events.send(match what {
                         Place::Mark(kind, exit) => PaneEvent::Mark { pane: id.clone(), kind, exit, line },
@@ -423,6 +427,7 @@ fn read_loop(mut r: UnixStream, term: Arc<FairMutex<Term<Replies>>>, id: String,
                         Place::WebPane(url) => PaneEvent::WebPane { pane: id.clone(), url },
                         Place::Image(body) => PaneEvent::Image { pane: id.clone(), body, line, col },
                         Place::Layers(list) => PaneEvent::Layers { pane: id.clone(), list },
+                        Place::Ui(body) => PaneEvent::Ui { pane: id.clone(), body, top: line - t_line },
                         Place::Fx(_) => continue,
                     });
                 }
@@ -457,7 +462,7 @@ fn passthrough(chunk: &[u8]) -> Vec<Vec<u8>> {
         let start = i + p;
         let Some(end) = chunk[start..].iter().position(|&b| b == 0x07).map(|e| start + e + 1) else { break };
         // popups only: Neovim mode (7733;nvim) belongs to the pane, not to the outer window
-        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") && !chunk[start..end].starts_with(b"\x1b]7733;cmd;") && !chunk[start..end].starts_with(b"\x1b]7733;cmdid;") && !chunk[start..end].starts_with(b"\x1b]7733;keys;") && !chunk[start..end].starts_with(b"\x1b]7733;webpane;") && !chunk[start..end].starts_with(b"\x1b]7733;fx") && !chunk[start..end].starts_with(b"\x1b]7733;layers") {
+        if !chunk[start..end].starts_with(b"\x1b]7733;nvim;") && !chunk[start..end].starts_with(b"\x1b]7733;job;") && !chunk[start..end].starts_with(b"\x1b]7733;cmd;") && !chunk[start..end].starts_with(b"\x1b]7733;cmdid;") && !chunk[start..end].starts_with(b"\x1b]7733;keys;") && !chunk[start..end].starts_with(b"\x1b]7733;webpane;") && !chunk[start..end].starts_with(b"\x1b]7733;fx") && !chunk[start..end].starts_with(b"\x1b]7733;layers") && !chunk[start..end].starts_with(b"\x1b]7733;ui") {
             out.push(chunk[start..end].to_vec());
         }
         i = end;
@@ -476,6 +481,8 @@ enum Place {
     Fx(String),
     /// the program's floats (OSC 7733;layers;x,y,w,h;…), in the pane's cells
     Layers(String),
+    /// zash's UI hints (OSC 7733;ui;…): the regions, empty to clear
+    Ui(String),
     /// a Kitty graphics command (APC G): its body
     Image(String),
 }
@@ -509,6 +516,8 @@ fn places(chunk: &[u8]) -> Vec<(usize, Place)> {
             out.push((end.min(chunk.len()), Place::Cmd(cmd.to_string())));
         } else if let Some(l) = body.strip_prefix("7733;layers;").or_else(|| (body == "7733;layers").then_some("")) {
             out.push((end.min(chunk.len()), Place::Layers(l.to_string())));
+        } else if let Some(u) = body.strip_prefix("7733;ui;").or_else(|| (body == "7733;ui").then_some("")) {
+            out.push((end.min(chunk.len()), Place::Ui(u.to_string())));
         } else if let Some(fx) = body.strip_prefix("7733;fx") {
             out.push((end.min(chunk.len()), Place::Fx(fx.trim_start_matches(';').to_string())));
         }

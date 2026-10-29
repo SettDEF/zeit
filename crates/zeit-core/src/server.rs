@@ -88,6 +88,8 @@ struct Client {
     zash: bool,
     last_panes: String,
     last_layers: String,
+    /// the UI hints last told to it (all panes', moved to where they are)
+    last_ui: String,
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +145,8 @@ pub struct Server {
     images: images::Images,
     /// each pane's floats (zett's popups) in its own cells: x, y, w, h (OSC 7733;layers)
     pane_layers: HashMap<String, Vec<[u16; 4]>>,
+    /// each pane's UI hints (OSC 7733;ui) as sent, in its cells, and the line at its top then
+    pane_ui: HashMap<String, (String, i64)>,
     /// copied text, newest first (tmux's paste buffers)
     buffers: Vec<String>,
     /// panes in copy mode
@@ -219,7 +223,7 @@ pub fn run(name: &str, exe: PathBuf) -> std::io::Result<()> {
     let keys = build_keys(&ext);
     let look = Look::from(&keys.opts);
     let state_file = paths::state_dir().join(format!("{name}.sessions"));
-    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), blocks: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_stack: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), mouse_sel: HashMap::new(), mouse_state: HashMap::new(), images: Default::default(), pane_layers: HashMap::new() };
+    let mut s = Server { exe, state_file, sessions: Vec::new(), panes: HashMap::new(), clients: HashMap::new(), next_client: 1, tx, pane_tx, ext, keys, size: (80, 24), dirty: false, next_frame: std::time::Instant::now(), pending: HashMap::new(), carry: HashMap::new(), look, buffers: Vec::new(), copy: HashMap::new(), prev_pane: HashMap::new(), activity: HashSet::new(), last_search: None, layout_at: HashMap::new(), webs: HashMap::new(), claims: HashMap::new(), running: HashMap::new(), blocks: HashMap::new(), histories: HashMap::new(), jobs: Vec::new(), ticking: Default::default(), popups: HashMap::new(), popup_stack: HashMap::new(), popup_below: HashSet::new(), popup_drags: HashMap::new(), mouse_sel: HashMap::new(), mouse_state: HashMap::new(), images: Default::default(), pane_layers: HashMap::new(), pane_ui: HashMap::new() };
     {
         let (tick, tx) = (s.ticking.clone(), s.tx.clone());
         std::thread::spawn(move || loop {
@@ -373,7 +377,7 @@ impl Server {
                         }
                     }
                 });
-                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new(), last_zelt: String::new(), last_under: String::new(), last_fx: Vec::new(), graphics: false, last_imgs: HashMap::new(), sent_imgs: HashSet::new(), zash: false, last_panes: String::new(), last_layers: String::new() });
+                self.clients.insert(id, Client { out: stream, session: None, cols: 80, rows: 24, last: Vec::new(), notice: None, overlay: None, last_rows: String::new(), last_pins: HashMap::new(), last_zelt: String::new(), last_under: String::new(), last_fx: Vec::new(), graphics: false, last_imgs: HashMap::new(), sent_imgs: HashSet::new(), zash: false, last_panes: String::new(), last_layers: String::new(), last_ui: String::new() });
             }
             Ev::Gone(id) => {
                 self.clients.remove(&id);
@@ -455,6 +459,14 @@ impl Server {
                     (n.len() == 4).then(|| [n[0], n[1], n[2], n[3]])
                 }).collect();
                 self.pane_layers.insert(pane, rects);
+                self.dirty = true;
+            }
+            Ev::Pane(PaneEvent::Ui { pane, body, top }) => {
+                if body.is_empty() {
+                    self.pane_ui.remove(&pane);
+                } else {
+                    self.pane_ui.insert(pane, (body, top));
+                }
                 self.dirty = true;
             }
             Ev::Pane(PaneEvent::Image { pane, body, line, col }) => {
@@ -613,6 +625,15 @@ impl Server {
         let mut plain: Vec<u8> = Vec::new();
         let mut i = 0;
         while i < bytes.len() {
+            // zash telling a hint's program what happened to it: to that pane, under its own id
+            if let Some((pin, ev, n)) = ui_event(&bytes[i..]) {
+                self.flush_keys(cid, &mut plain);
+                if let Some(p) = self.panes.iter().find(|(id, _)| pin_id(id) == pin).map(|(_, p)| p) {
+                    p.input(&ev);
+                }
+                i += n;
+                continue;
+            }
             if let Some((b, x, y, press, n)) = sgr_mouse(&bytes[i..]) {
                 self.flush_keys(cid, &mut plain);
                 self.mouse(cid, b, x, y, press);
@@ -957,6 +978,7 @@ impl Server {
     fn pane_gone(&mut self, pane: &str, code: i32) {
         self.images.pane_gone(pane);
         self.pane_layers.remove(pane);
+        self.pane_ui.remove(pane);
         self.panes.remove(pane);
         if self.popup_gone(pane) {
             let _ = std::fs::remove_file(paths::pane_socket(pane));
@@ -1336,6 +1358,25 @@ impl Server {
             }
             if send_layers {
                 self.send(cid, &ServerMsg::Passthrough(lmsg.into_bytes()));
+            }
+            // the panes' UI hints (zash's panels, buttons…): moved to where each pane is, cut at its
+            // edges, shifted by what it scrolled since, their ids named by pane (events come back here)
+            let regions: Vec<String> = placed.iter().filter_map(|(id, r)| {
+                let (body, top) = self.pane_ui.get(id)?;
+                let p = self.panes.get(id)?;
+                let t = p.term.lock();
+                let now = t.grid().history_size() as i64 - t.grid().display_offset() as i64;
+                Some(place_ui(body, pin_id(id), (r.x, r.y, r.w, r.h), now - top))
+            }).flatten().collect();
+            let umsg = if regions.is_empty() { "\x1b]7733;ui\x07".to_string() } else { format!("\x1b]7733;ui;{}\x07", regions.join(";")) };
+            let c = self.clients.get_mut(&cid).unwrap();
+            if c.last_ui != umsg {
+                // nothing sent yet and nothing to send: no clearing escape either
+                let first_empty = c.last_ui.is_empty() && regions.is_empty();
+                c.last_ui = umsg.clone();
+                if !first_empty {
+                    self.send(cid, &ServerMsg::Passthrough(umsg.into_bytes()));
+                }
             }
         }
         // panes' Kitty images, for a terminal that shows them: placed where each pane is, at the
@@ -3949,4 +3990,66 @@ fn peer_pid(s: &UnixStream) -> Option<i32> {
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     let r = unsafe { libc::getsockopt(s.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len) };
     (r == 0 && cred.pid > 0).then_some(cred.pid)
+}
+
+/// A pane's UI hints for the outer zash: each region moved by the pane's place (x, y, w, h), up by `shift` lines
+/// it scrolled since, cut at its edges (gone when outside); id=X becomes id=PIN~X so a click names its pane.
+fn place_ui(body: &str, pin: u32, r: (u16, u16, u16, u16), shift: i64) -> Vec<String> {
+    body.split(';').filter_map(|reg| {
+        let mut f = reg.split(',');
+        let kind = f.next()?;
+        let n: Vec<i64> = f.by_ref().take(4).filter_map(|x| x.trim().parse().ok()).collect();
+        if n.len() != 4 {
+            return None;
+        }
+        let (x, y, w, h) = (n[0], n[1] - shift, n[2], n[3]);
+        let (pw, ph) = (r.2 as i64, r.3 as i64);
+        if x >= pw || y >= ph || y + h <= 0 || w <= 0 || h <= 0 {
+            return None;
+        }
+        let (y0, h) = (y.max(0), (y + h).min(ph) - y.max(0));
+        let w = w.min(pw - x);
+        let rest: Vec<String> = f.map(|kv| match kv.strip_prefix("id=") { Some(v) => format!("id={pin:x}~{v}"), None => kv.to_string() }).collect();
+        let mut s = format!("{kind},{},{},{w},{h}", x + r.0 as i64, y0 + r.1 as i64);
+        for kv in rest {
+            s.push(',');
+            s.push_str(&kv);
+        }
+        Some(s)
+    }).collect()
+}
+
+/// An event zash sends for a hint (ESC ] 7733;ev;KIND;PIN~ID BEL): its pane's pin and the event as that pane's program
+/// should get it (with its own id); its length in `bytes`.
+fn ui_event(bytes: &[u8]) -> Option<(u32, Vec<u8>, usize)> {
+    const HEAD: &[u8] = b"\x1b]7733;ev;";
+    if !bytes.starts_with(HEAD) {
+        return None;
+    }
+    let end = bytes.iter().position(|&b| b == 0x07)?;
+    let body = std::str::from_utf8(&bytes[HEAD.len()..end]).ok()?;
+    let (kind, id) = body.split_once(';')?;
+    let (pin, own) = id.split_once('~')?;
+    Some((u32::from_str_radix(pin, 16).ok()?, format!("\x1b]7733;ev;{kind};{own}\x07").into_bytes(), end + 1))
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+
+    #[test]
+    fn hints_move_with_their_pane_and_stay_inside_it() {
+        let out = place_ui("button,2,1,8,1,text=Save,id=save;panel,0,0,100,3;text,0,9,4,1,text=gone", 0xab, (10, 5, 40, 6), 0);
+        assert_eq!(out, vec!["button,12,6,8,1,text=Save,id=ab~save".to_string(), "panel,10,5,40,3".to_string()]);
+        // scrolled up two lines since: the row with the button left the pane
+        assert_eq!(place_ui("button,2,1,8,1;panel,0,3,4,1", 1, (0, 0, 40, 6), 2), vec!["panel,0,1,4,1".to_string()]);
+    }
+
+    #[test]
+    fn an_event_finds_its_pane_and_loses_the_pane_name() {
+        let (pin, ev, n) = ui_event(b"\x1b]7733;ev;click;ab~save\x07rest").unwrap();
+        assert_eq!((pin, n), (0xab, 24));
+        assert_eq!(ev, b"\x1b]7733;ev;click;save\x07".to_vec());
+        assert!(ui_event(b"\x1b]7733;ev;click;noname\x07").is_none());
+    }
 }
