@@ -384,6 +384,10 @@ impl Server {
             }
             Ev::Msg(id, m) => self.message(id, m),
             Ev::Pane(PaneEvent::Output(id)) => {
+                // wrap off: a full-screen program starting or leaving changes how wide the terminal should be
+                if let Some(p) = self.panes.get_mut(&id).filter(|p| p.nowrap) {
+                    p.sync_wrap();
+                }
                 if self.look.activity_on && !self.shown(&id) {
                     self.activity.insert(id);
                 }
@@ -757,6 +761,22 @@ impl Server {
         let Some(w) = s.windows.get(s.active) else { return };
         let (cx, cy) = (x.saturating_sub(1), y.saturating_sub(1));
         let placed = if w.zoom { vec![(w.focus.clone(), area)] } else { w.layout.place(area).0 };
+        // wrap off: the wheel sideways (buttons 66, 67) or with Shift (64 + 4, 65 + 4) moves the view across
+        let side = match b & !16 {
+            66 | 68 => Some(-1i32),
+            67 | 69 => Some(1),
+            _ => None,
+        };
+        if let Some(d) = side.filter(|_| press) {
+            if let Some((id, _)) = placed.iter().find(|(_, r)| cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h).cloned() {
+                if let Some(p) = self.panes.get(&id).filter(|p| p.nowrap && !p.alt_screen()) {
+                    let max = crate::pane::NOWRAP_COLS.saturating_sub(p.cols);
+                    p.hscroll.set((p.hscroll.get() as i32 + d * 6).clamp(0, max as i32) as u16);
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
         let window_focus = w.focus.clone();
         // dragging a popup (its frame, or Alt anywhere; Ctrl or the corner resizes)
         if self.popup_drag(cid, &sid, b, cx, cy, press) {
@@ -1101,18 +1121,54 @@ impl Server {
         // zash effects on the panes' cells: (row, from, to, link, the cells), kept below only where
         // nothing was drawn over them (a border, a float, a popup)
         let mut fx: Vec<(usize, usize, usize, String, Vec<Cell>)> = Vec::new();
+        // wrap off: where each pane's view starts across (it follows the cursor when that moved out of sight)
+        let mut hs: Vec<(String, u16)> = Vec::new();
+        let mut seen: Vec<(String, Option<(u16, u16)>)> = Vec::new();
+        for (id, r) in &placed {
+            let Some(p) = self.panes.get(id).filter(|p| p.nowrap && !p.alt_screen()) else { continue };
+            let (_, cur, _) = p.screen();
+            let mut h = p.hscroll.get();
+            if let Some((cx, cy)) = cur.filter(|c| p.last_cursor.get() != Some(*c)) {
+                let _ = cy;
+                if cx < h { h = cx.saturating_sub(r.w / 3) }
+                if cx >= h + r.w { h = cx + 1 - r.w + r.w / 3 }
+            }
+            hs.push((id.clone(), h));
+        }
+        for (id, h) in &hs {
+            if let Some(p) = self.panes.get(id) {
+                p.hscroll.set(*h);
+            }
+        }
         for (id, r) in &placed {
             let Some(p) = self.panes.get(id) else { continue };
             let (screen, cur, sh) = p.screen();
+            let h = hs.iter().find(|(i, _)| i == id).map(|(_, h)| *h as usize).unwrap_or(0);
+            let cut = hs.iter().any(|(i, _)| i == id);
             for (y, row) in screen.iter().enumerate().take(r.h as usize) {
                 let gy = r.y as usize + y;
                 if gy >= grid.len() {
                     break;
                 }
-                for (x, cell) in row.iter().enumerate().take(r.w as usize) {
+                for (x, cell) in row.iter().skip(h).enumerate().take(r.w as usize) {
                     let gx = r.x as usize + x;
                     if gx < grid[gy].len() {
                         grid[gy][gx] = cell.clone();
+                    }
+                }
+                // more of the line to the right / to the left: a dim marker at that edge
+                if cut && r.w > 2 {
+                    let has = |c: &Cell| !c.text.trim().is_empty();
+                    let mark = |grid: &mut Vec<Vec<Cell>>, gx: usize, ch: &str| {
+                        if gx < grid[gy].len() {
+                            grid[gy][gx] = Cell { text: ch.into(), fg: grid[gy][gx].fg, bg: grid[gy][gx].bg, flags: zeit_proto::DIM | zeit_proto::BOLD };
+                        }
+                    };
+                    if row.iter().skip(h + r.w as usize).any(has) {
+                        mark(&mut grid, r.x as usize + r.w as usize - 1, "›");
+                    }
+                    if h > 0 && row.iter().take(h).any(has) {
+                        mark(&mut grid, r.x as usize, "‹");
                     }
                 }
             }
@@ -1127,8 +1183,15 @@ impl Server {
                 }
             }
             if *id == w.focus {
-                cursor = cur.map(|(x, y)| (r.x + x, r.y + y));
+                // wrap off: the cursor where the view shows it, none when it is out of sight
+                cursor = cur.and_then(|(x, y)| { let x = x as i64 - h as i64; (x >= 0 && x < r.w as i64).then(|| (r.x + x as u16, r.y + y)) });
                 shape = sh;
+            }
+            if cut { seen.push((id.clone(), cur)) }
+        }
+        for (id, c) in seen {
+            if let Some(p) = self.panes.get(&id) {
+                p.last_cursor.set(c);
             }
         }
         for (id, r) in &placed {
@@ -1560,6 +1623,31 @@ impl Server {
                 }
                 self.layout_all();
                 Ok(String::new())
+            }
+            // wrap on|off|toggle (default) · left|right [N] · home: long lines in the focused pane (wrap off: one row each,
+            // the view moved across them)
+            "wrap" => {
+                let Some((sid, wi)) = here.clone() else { return Err("no pane".into()) };
+                let f = self.session(&sid).map(|s| s.windows[wi].focus.clone()).unwrap_or_default();
+                let a = rest(&["-t"]);
+                let n: u16 = a.get(1).and_then(|v| v.parse().ok()).unwrap_or(8);
+                let Some(p) = self.panes.get_mut(&f) else { return Err("no pane".into()) };
+                match a.first().map(String::as_str) {
+                    Some("on") => p.nowrap = false,
+                    Some("off") => p.nowrap = true,
+                    Some("left") => p.hscroll.set(p.hscroll.get().saturating_sub(n)),
+                    Some("right") if p.nowrap => p.hscroll.set((p.hscroll.get() + n).min(crate::pane::NOWRAP_COLS.saturating_sub(p.cols))),
+                    Some("home") => p.hscroll.set(0),
+                    Some("right") => {}
+                    _ => p.nowrap = !p.nowrap,
+                }
+                p.sync_wrap();
+                if !p.nowrap {
+                    p.hscroll.set(0);
+                }
+                let msg = if p.nowrap { "wrap off: long lines stay one row (Shift+wheel or prefix < > moves across)" } else { "wrap on" };
+                self.dirty = true;
+                Ok(msg.into())
             }
             "resize-pane" | "resizep" => {
                 let Some((sid, wi)) = here.clone() else { return Err("no pane".into()) };

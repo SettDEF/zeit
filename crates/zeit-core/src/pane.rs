@@ -65,6 +65,9 @@ impl EventListener for Replies {
     }
 }
 
+/// A pane with wrap off: its terminal this wide (lines longer than this wrap anyway)
+pub const NOWRAP_COLS: u16 = 1000;
+
 pub struct Pane {
     pub id: String,
     pub term: Arc<FairMutex<Term<Replies>>>,
@@ -76,6 +79,12 @@ pub struct Pane {
     pub pid: u32,
     /// the folder it started in
     pub start_dir: PathBuf,
+    /// wrap off (`zeit wrap off`, prefix W): long lines stay one row, the pane shows a window of a wide terminal
+    pub nowrap: bool,
+    /// with wrap off: the first column shown
+    pub hscroll: std::cell::Cell<u16>,
+    /// the cursor last frame (the view follows it when it moves out of sight)
+    pub last_cursor: std::cell::Cell<Option<(u16, u16)>>,
 }
 
 impl Pane {
@@ -97,7 +106,7 @@ impl Pane {
         let term = Arc::new(FairMutex::new(Term::new(config, &size, replies)));
         let (t, pid_s, id_s) = (term.clone(), id.to_string(), id.to_string());
         std::thread::Builder::new().name(format!("zeit pane {pid_s}")).spawn(move || read_loop(reader, t, id_s, events))?;
-        let p = Pane { id: id.into(), term, writer, title, cols, rows, pid, start_dir };
+        let p = Pane { id: id.into(), term, writer, title, cols, rows, pid, start_dir, nowrap: false, hscroll: Default::default(), last_cursor: Default::default() };
         p.resize(cols, rows);
         Ok(p)
     }
@@ -119,8 +128,27 @@ impl Pane {
         if (cols, rows) != (self.cols, self.rows) {
             self.cols = cols;
             self.rows = rows;
-            self.resize(cols, rows);
+            self.resize(self.term_cols(), rows);
         }
+    }
+
+    /// How wide its terminal is: the pane's width, or WIDE with wrap off while no full-screen program runs
+    /// (one holds the alternate screen and draws for the real width: it gets it)
+    pub fn term_cols(&self) -> u16 {
+        if self.nowrap && !self.alt_screen() { NOWRAP_COLS.max(self.cols) } else { self.cols }
+    }
+
+    /// Its terminal resized when wrap or the screen it is on changed what it should be; true when it was.
+    pub fn sync_wrap(&mut self) -> bool {
+        let want = self.term_cols();
+        if self.term.lock().columns() != want as usize {
+            self.resize(want, self.rows);
+            if want == self.cols {
+                self.hscroll.set(0);
+            }
+            return true;
+        }
+        false
     }
 
     pub fn hang_up(&self) {

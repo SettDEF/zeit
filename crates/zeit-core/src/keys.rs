@@ -181,6 +181,10 @@ impl Keys {
             "bind -r M-Up resize-pane -U 5",
             "bind -r M-Down resize-pane -D 5",
             "bind z resize-pane -Z",
+            // wrap off for long lines (logs, builds): W toggles, < > move the view across
+            "bind W wrap",
+            "bind -r < wrap left 8",
+            "bind -r > wrap right 8",
             "bind x kill-pane",
             "bind c new-window",
             "bind & kill-window",
